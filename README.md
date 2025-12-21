@@ -21,7 +21,8 @@ This app works entirely locally (your chats and files stay on your machine) whil
 - **Drag & drop / paste support**: Easily add files or images from clipboard
 - **No data leaves your device**: All files and chats stored locally
 
-## Installation & Requirements
+# <img src="https://raw.githubusercontent.com/Universe-shifting/AI-Chat-Studio/refs/heads/main/ai_icon.png" width="30" height="30" />  Installation & Requirements <img src="https://raw.githubusercontent.com/Universe-shifting/AI-Chat-Studio/refs/heads/main/ai_icon.png" width="30" height="30" />
+
 
 1. **Python 3.8+** required
 2. Install dependencies:
