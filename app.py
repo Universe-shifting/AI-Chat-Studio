@@ -23,28 +23,64 @@ CHATS_FILE = "chats.json"
 
 AUTO_CHUNK_THRESHOLD = 30000
 
-VISION_MODELS = [
+TEXT_MODELS_FAST = [
     "gemini-fast",
     "openai-fast",
-    "openai-large",
-    "gemini-search",
-    "gemini-large",
-    "claude-large",
-    "openai",
-    "gemini"
-]
-TEXT_MODELS = VISION_MODELS + [
     "grok",
-    "claude",
     "mistral",
     "qwen-coder",
     "llama",
+]
+
+TEXT_MODELS_LARGE = [
+    "claude-large",
+    "gemini-large",
+    "openai-large",
+]
+
+TEXT_MODELS_OTHER = [
+    "openai",
+    "gemini",
+    "claude",
+    "gemini-search",
+    "chickytutor",
+    "perplexity-fast",
+    "perplexity-reasoning",
+    "kimi-k2-thinking",
+    "deepseek",
 ]
 
 IMAGE_MODELS = [
     "flux",
     "zimage",
     "turbo",
+    "gptimage",
+    "seedream",
+    "kontext",
+    "nanobanana",
+    "seedream-pro",
+    "nanobanana-pro",
+]
+
+TEXT_MODELS = TEXT_MODELS_FAST + TEXT_MODELS_LARGE + TEXT_MODELS_OTHER
+
+VISION_MODELS = [
+    "gemini-fast",
+    "openai-fast",
+    "gemini-large",
+    "openai-large",
+    "gemini-search",
+    "claude-large",
+    "openai",
+    "gemini",
+    "grok",
+    "claude",
+    "claude-fast",
+    "seedream",
+    "kontext",
+    "nanobanana",
+    "seedream-pro",
+    "nanobanana-pro",
     "gptimage",
 ]
 
@@ -1908,8 +1944,8 @@ class AIChatApp(QMainWindow):
         if self.current_streaming_bubble:
             sb = self.chat_area.verticalScrollBar()
             was_at_bottom = sb.value() >= (sb.maximum() - 30)
+
             self.current_streaming_bubble.add_text_chunk(chunk)
-            QApplication.processEvents()
             if was_at_bottom:
                 sb.setValue(sb.maximum())
 
