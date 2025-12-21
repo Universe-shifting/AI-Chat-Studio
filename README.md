@@ -8,7 +8,7 @@ AI Chat Studio is a feature-rich, offline-first desktop application built with P
 
 This app works entirely locally (your chats and files stay on your machine) while leveraging the free, open Pollinations.AI API for powerful AI capabilities.
 
-## Key Features
+# <img src="https://raw.githubusercontent.com/Universe-shifting/AI-Chat-Studio/refs/heads/main/ai_icon.png" width="30" height="30" />  Key Features <img src="https://raw.githubusercontent.com/Universe-shifting/AI-Chat-Studio/refs/heads/main/ai_icon.png" width="30" height="30" />
 
 - **Multi-model support**: Choose from top text models (Gemini, Claude, Grok, Mistral, Llama, etc.) and image models (Flux, Turbo, etc.)
 - **Multimodal conversations**: Attach images, PDFs, DOCX, PPTX, or text files — the AI can "see" and discuss them
