@@ -21,15 +21,6 @@ This app works entirely locally (your chats and files stay on your machine) whil
 - **Drag & drop / paste support**: Easily add files or images from clipboard
 - **No data leaves your device**: All files and chats stored locally
 
-## Screenshots
-
-*(Coming soon — add your own screenshots here!)*
-
-- Main chat interface
-- Image generation mode
-- File attachments and workspace browser
-- Settings and model selection
-
 ## Installation & Requirements
 
 1. **Python 3.8+** required
