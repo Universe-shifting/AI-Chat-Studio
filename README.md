@@ -17,7 +17,6 @@ AI Chat Studio is a feature-rich, offline-first desktop application built with P
 - **Streaming responses**: Real-time typing effect with smooth scrolling
 - **Attachment preview**: See thumbnails of attached images/files before sending
 - **Drag & drop / paste support**: Easily add files or images from clipboard
-- **No data leaves your device**: All files and chats stored locally
 
 # <img src="https://raw.githubusercontent.com/Universe-shifting/AI-Chat-Studio/refs/heads/main/ai_icon.png" width="30" height="30" />  Installation & Requirements <img src="https://raw.githubusercontent.com/Universe-shifting/AI-Chat-Studio/refs/heads/main/ai_icon.png" width="30" height="30" />
 
@@ -27,3 +26,4 @@ AI Chat Studio is a feature-rich, offline-first desktop application built with P
 
 ```bash
 pip install PyQt6 requests pypdf python-docx python-pptx
+```
