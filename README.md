@@ -25,5 +25,5 @@ AI Chat Studio is a feature-rich, offline-first desktop application built with P
 2. Install dependencies:
 
 ```bash
-pip install PyQt6 requests pypdf python-docx python-pptx
+pip install PyQt6 requests opencv-python numpy moviepy SpeechRecognition pypdf python-docx python-pptx pillow
 ```
