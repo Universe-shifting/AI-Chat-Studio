@@ -7,10 +7,21 @@ import json
 import uuid
 import base64
 import requests
+import mimetypes
 from datetime import datetime
+import tempfile
+import speech_recognition as sr
+from moviepy import VideoFileClip
+
+import cv2
+import numpy as np
+
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PyQt6.QtMultimediaWidgets import QVideoWidget
+
 import pypdf
 import docx
 from pptx import Presentation
@@ -18,10 +29,27 @@ from pptx import Presentation
 DEFAULT_API_KEY = ""
 SETTINGS_FILE = "settings.json"
 WORKSPACE_FOLDER = "ai_workspace"
-IMAGES_FOLDER = os.path.join(WORKSPACE_FOLDER, "images")
+MEDIA_FOLDER = os.path.join(WORKSPACE_FOLDER, "images")
 CHATS_FILE = "chats.json"
 
 AUTO_CHUNK_THRESHOLD = 30000
+
+MAX_VIDEO_SIZE_BYTES = 20 * 1024 * 1024
+
+#Mdl2 icons cuz windows 11 emojis look ugly
+MDL2_ICONS = {
+    'attach': '\uE723',      # Paperclip
+    'folder': '\uE8B7',      # Folder
+    'settings': '\uE713',    # Settings/Gear
+    'new': '\uE710',         # Add/Plus
+    'search': '\uE721',      # Search
+    'file': '\uE8A5',        # Document
+    'image': '\uE91B',       # Picture
+    'video': '\uE714',       # Video
+    'delete': '\uE74D',      # Delete
+}
+
+
 
 TEXT_MODELS_FAST = [
     "gemini-fast",
@@ -84,6 +112,7 @@ VISION_MODELS = [
     "gptimage",
 ]
 
+
 class SettingsManager:
     @staticmethod
     def get_api_key():
@@ -101,6 +130,7 @@ class SettingsManager:
         data = {"api_key": key}
         with open(SETTINGS_FILE, 'w') as f:
             json.dump(data, f)
+
 
 SCROLLBAR_STYLESHEET = """
 QScrollBar:vertical {
@@ -188,9 +218,32 @@ DIALOG_STYLESHEET = """
 
 
 class FileConverter:
+    TEXT_EXTENSIONS = {
+        '.txt', '.md', '.py', '.js', '.html', '.css', '.json', '.csv', '.xml',
+        '.java', '.c', '.cpp', '.h', '.cs', '.php', '.rb', '.go', '.rs',
+        '.swift', '.ts', '.sh', '.bat', '.ps1', '.sql', '.yaml', '.yml',
+        '.ini', '.toml', '.cfg', '.log', '.env', '.dockerfile'
+    }
+
+    VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'}
+    IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+
     @staticmethod
     def get_file_extension(filepath):
         return os.path.splitext(filepath)[1].lower()
+
+    @staticmethod
+    def is_video(filepath):
+        return FileConverter.get_file_extension(filepath) in FileConverter.VIDEO_EXTENSIONS
+
+    @staticmethod
+    def is_image(filepath):
+        return FileConverter.get_file_extension(filepath) in FileConverter.IMAGE_EXTENSIONS
+
+    @staticmethod
+    def get_mime_type(filepath):
+        mime_type, _ = mimetypes.guess_type(filepath)
+        return mime_type or "application/octet-stream"
 
     @staticmethod
     def read_pdf(filepath):
@@ -225,12 +278,130 @@ class FileConverter:
             return f"[Error reading PPTX: {str(e)}]"
 
     @staticmethod
-    def encode_image_base64(filepath):
+    def encode_media_base64(filepath):
         try:
-            with open(filepath, "rb") as image_file:
-                return base64.b64encode(image_file.read()).decode('utf-8')
+            with open(filepath, "rb") as media_file:
+                return base64.b64encode(media_file.read()).decode('utf-8')
         except Exception as e:
+            print(f"Error encoding media: {e}")
             return None
+
+    @staticmethod
+    def get_video_thumbnail(filepath):
+        """Extracts the first frame of a video using OpenCV and returns a QPixmap."""
+        try:
+            cap = cv2.VideoCapture(filepath)
+            if not cap.isOpened():
+                return None
+
+            ret, frame = cap.read()
+            cap.release()
+
+            if not ret:
+                return None
+
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = frame.shape
+            bytes_per_line = ch * w
+            q_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+
+            return QPixmap.fromImage(q_img)
+        except Exception as e:
+            print(f"Error extracting video thumbnail: {e}")
+            return None
+
+    @staticmethod
+    def extract_frames_for_api(filepath, max_frames=20, quality=70):
+        """
+        Extracts keyframes from a video to simulate 'watching' it.
+        """
+        try:
+            cap = cv2.VideoCapture(filepath)
+            if not cap.isOpened():
+                return []
+
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            step = max(1, total_frames // max_frames)
+
+            frames_b64 = []
+            count = 0
+
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                if count % step == 0:
+                    h, w = frame.shape[:2]
+                    scale = min(512 / w, 512 / h)
+                    new_w, new_h = int(w * scale), int(h * scale)
+                    resized = cv2.resize(frame, (new_w, new_h))
+
+                    _, buffer = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+                    b64_str = base64.b64encode(buffer).decode('utf-8')
+                    frames_b64.append(b64_str)
+
+                    if len(frames_b64) >= max_frames:
+                        break
+
+                count += 1
+
+            cap.release()
+            return frames_b64
+        except Exception as e:
+            print(f"Error extracting frames: {e}")
+            return []
+
+    @staticmethod
+    def extract_audio_text_from_video(filepath):
+        video_clip = None
+        temp_audio_path = None
+        try:
+            print(f"[Info] Extracting audio from {filepath}...")
+            video_clip = VideoFileClip(filepath)
+
+            if not video_clip.audio:
+                return "[Video has no audio track]"
+
+            duration = getattr(video_clip, 'duration', None)
+
+            if duration and duration > 0:
+                max_dur = min(duration, 90.0)
+                try:
+                    audio_subclip = video_clip.subclip(0, max_dur).audio
+                except Exception:
+                    audio_subclip = video_clip.audio.with_end(max_dur)
+            else:
+                audio_subclip = video_clip.audio
+
+            fd, temp_audio_path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+
+            audio_subclip.write_audiofile(
+                temp_audio_path,
+                codec="pcm_s16le",
+                fps=16000,
+                ffmpeg_params=["-ac", "1"]
+            )
+
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(temp_audio_path) as source:
+                audio_data = recognizer.record(source)
+                return recognizer.recognize_google(audio_data)
+
+        except sr.UnknownValueError:
+            return "[Audio was present but unintelligible]"
+        except Exception as e:
+            print(f"[Error] Audio processing failed: {e}")
+            return f"[Error extracting audio: {str(e)}]"
+        finally:
+            if video_clip:
+                video_clip.close()
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                try:
+                    os.remove(temp_audio_path)
+                except:
+                    pass
 
     @staticmethod
     def convert(filepath):
@@ -242,27 +413,32 @@ class FileConverter:
             return FileConverter.read_docx(filepath)
         elif ext in [".pptx", ".ppt"]:
             return FileConverter.read_pptx(filepath)
-        else:
+        elif ext in FileConverter.TEXT_EXTENSIONS or ext == "":
             try:
-                with open(filepath, 'r', encoding='utf-8') as f:
+                with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
                     return f.read()
-            except UnicodeDecodeError:
-                return "[Error: File is not a text file and format is not supported]"
             except Exception as e:
                 return f"[Error reading file: {str(e)}]"
+        else:
+            try:
+                with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+                    return f.read()
+            except:
+                return "[Error: Binary or unsupported file format]"
 
 
 DEFAULT_SYSTEM_PROMPT = f"""
 You are an advanced AI assistant with file system access. 
+Sometimes files are sent to u in a split variant but that's okay. User sees it normally so u don't need to reconstruct anything.
 You don't have a main purpose of only working with files (U should also be a good chatbot).
 You are working inside an isolated project folder named '{WORKSPACE_FOLDER}'.
-You can see attached images.
+You can see attached images and videos.
 
 PROJECT MANAGMENT CAPABILITIES:
 1. You can CREATE or OVERWRITE files.
 2. You can DELETE files.
 3. You can READ files (if the user attaches them).
-4. You can SEE images if attached.
+4. You can SEE images and WATCH videos if attached.
 
 COMMAND SYNTAX:
 To perform actions, you MUST use the following specific block formats in your response.
@@ -279,6 +455,7 @@ RULES:
 - Do not use markdown code blocks inside the :::create::: tags. Just write the raw text.
 - Only modify files if explicitly asked or if it solves the user's coding problem.
 - If you create a file, tell the user you have done so in your text response.
+- Don't spend a lot of time in thinking mode.
 """
 
 
@@ -287,8 +464,8 @@ class FileManager:
     def ensure_workspace():
         if not os.path.exists(WORKSPACE_FOLDER):
             os.makedirs(WORKSPACE_FOLDER)
-        if not os.path.exists(IMAGES_FOLDER):
-            os.makedirs(IMAGES_FOLDER)
+        if not os.path.exists(MEDIA_FOLDER):
+            os.makedirs(MEDIA_FOLDER)
 
     @staticmethod
     def is_safe_path(filename):
@@ -318,34 +495,18 @@ class FileManager:
         return f"File '{filename}' not found."
 
     @staticmethod
-    def save_image(base64_data):
+    def save_media_from_bytes(media_bytes, extension=".png"):
         try:
-            image_bytes = base64.b64decode(base64_data)
             image_id = str(uuid.uuid4())
-            filename = f"{image_id}.png"
-            path = os.path.join(IMAGES_FOLDER, filename)
+            filename = f"{image_id}{extension}"
+            path = os.path.join(MEDIA_FOLDER, filename)
 
             with open(path, "wb") as f:
-                f.write(image_bytes)
+                f.write(media_bytes)
 
             return f"images/{filename}"
         except Exception as e:
-            print(f"Error saving image: {e}")
-            return None
-
-    @staticmethod
-    def save_image_from_bytes(image_bytes):
-        try:
-            image_id = str(uuid.uuid4())
-            filename = f"{image_id}.png"
-            path = os.path.join(IMAGES_FOLDER, filename)
-
-            with open(path, "wb") as f:
-                f.write(image_bytes)
-
-            return f"images/{filename}"
-        except Exception as e:
-            print(f"Error saving image: {e}")
+            print(f"Error saving media: {e}")
             return None
 
 
@@ -419,14 +580,16 @@ class AIResponseThread(QThread):
                 "seed": random.randint(1, 10000),
                 "width": 1024,
                 "height": 1024,
+                "private": "true",
+                "safe": "false",
                 "nologo": "true"
             }
 
-            response = requests.get(url, headers=headers, params=params, timeout=60)
+            response = requests.get(url, headers=headers, params=params, timeout=250)
             response.raise_for_status()
 
             if response.content:
-                saved_path = FileManager.save_image_from_bytes(response.content)
+                saved_path = FileManager.save_media_from_bytes(response.content, ".png")
                 if saved_path:
                     self.image_generated.emit(response.content, saved_path)
                     self.response_complete.emit(f"🖼️ Generated image using {self.model}")
@@ -462,7 +625,7 @@ class AIResponseThread(QThread):
                     "temperature": 1.0
                 }
 
-                response = requests.post(url, headers=headers, json=payload, stream=True, timeout=45)
+                response = requests.post(url, headers=headers, json=payload, stream=True, timeout=250)
                 response.raise_for_status()
 
                 for line in response.iter_lines():
@@ -475,13 +638,14 @@ class AIResponseThread(QThread):
                                 break
                             try:
                                 chunk_json = json.loads(json_str)
+
                                 choices = chunk_json.get("choices", [])
                                 if choices:
                                     content = choices[0].get("delta", {}).get("content", "")
                                     if content:
                                         self.response_chunk.emit(content)
                                         full_response += content
-                                        self.msleep(5)
+                                        self.msleep(10)
                             except Exception:
                                 continue
 
@@ -503,10 +667,11 @@ class AIResponseThread(QThread):
                         "connection" in error_str or
                         "reset" in error_str or
                         "rate limit" in error_str or
+                        "413" in error_str or
                         "429" in error_str
                 )
 
-                if attempt < max_retries and self._is_running:
+                if attempt < max_retries and self._is_running and retryable:
                     delay = base_delay * (2 ** attempt) + (0.1 * attempt)
                     print(f"\n[Retry] {e} → Retrying in {delay:.1f}s...")
                     time.sleep(delay)
@@ -518,9 +683,21 @@ class AIResponseThread(QThread):
                     return
 
     def prepare_messages_for_api(self, messages):
+        """
+        Scan messages for local file paths.
+        - Images: Convert to base64.
+        - Videos:
+            1. Extract Audio Transcript so AI 'hears' it.
+            2. If it's the LATEST message: Send visuals (Base64 or Frames).
+            3. If it's an OLD message: Remove visuals (save tokens), keep Transcript.
+        """
         api_messages = []
-        for msg in messages:
+        total_msgs = len(messages)
+
+        for idx, msg in enumerate(messages):
+            is_latest = (idx == total_msgs - 1)
             new_msg = msg.copy()
+
             if isinstance(new_msg.get("content"), list):
                 new_content = []
                 for part in new_msg["content"]:
@@ -529,15 +706,60 @@ class AIResponseThread(QThread):
                         if not url.startswith("data:") and not url.startswith("http"):
                             full_path = os.path.join(WORKSPACE_FOLDER, url)
                             if os.path.exists(full_path):
-                                b64 = FileConverter.encode_image_base64(full_path)
+                                b64 = FileConverter.encode_media_base64(full_path)
                                 if b64:
                                     part_copy = part.copy()
                                     part_copy["image_url"] = {"url": f"data:image/png;base64,{b64}"}
                                     new_content.append(part_copy)
                                     continue
-                            else:
-                                print(f"Warning: Image file not found: {full_path}")
-                                continue
+                        new_content.append(part)
+
+                    elif part.get("type") == "video_url":
+                        url = part["video_url"]["url"]
+                        if not url.startswith("data:") and not url.startswith("http"):
+                            full_path = os.path.join(WORKSPACE_FOLDER, url)
+                            if os.path.exists(full_path):
+
+                                audio_text = FileConverter.extract_audio_text_from_video(full_path)
+                                new_content.append({
+                                    "type": "text",
+                                    "text": f"\n[Transcript of words spoken in video '{os.path.basename(url)}': \"{audio_text}\"]\n"
+                                })
+
+                                if is_latest:
+                                    file_size = os.path.getsize(full_path)
+
+                                    if file_size < MAX_VIDEO_SIZE_BYTES:
+                                        b64 = FileConverter.encode_media_base64(full_path)
+                                        mime = FileConverter.get_mime_type(full_path)
+                                        if b64:
+                                            part_copy = part.copy()
+                                            part_copy["video_url"] = {"url": f"data:{mime};base64,{b64}"}
+                                            new_content.append(part_copy)
+                                            continue
+
+                                    else:
+                                        print(
+                                            f"[Info] Video too large ({file_size / 1024 / 1024:.2f}MB). Extracting frames...")
+                                        frames = FileConverter.extract_frames_for_api(full_path, max_frames=20)
+                                        if frames:
+                                            new_content.append({"type": "text",
+                                                                "text": "[Video content represented by the following keyframes:]"})
+                                            for frame_b64 in frames:
+                                                new_content.append({
+                                                    "type": "image_url",
+                                                    "image_url": {
+                                                        "url": f"data:image/jpeg;base64,{frame_b64}"
+                                                    }
+                                                })
+                                            continue
+                                else:
+                                    new_content.append({
+                                        "type": "text",
+                                        "text": f"[Visual video data for '{os.path.basename(url)}' removed to save resources. See transcript above.]"
+                                    })
+                                    continue
+
                         new_content.append(part)
                     else:
                         new_content.append(part)
@@ -568,9 +790,10 @@ class StreamingMessageBubble(QFrame):
         super().__init__()
         self.sender = sender
         self.full_text = text
+        self.display_buffer = text
+
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setStyleSheet(self._bubble_style())
-
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
 
         self.layout = QVBoxLayout(self)
@@ -598,6 +821,11 @@ class StreamingMessageBubble(QFrame):
 
         self.setMaximumWidth(650)
 
+        self.update_timer = QTimer()
+        self.update_timer.setInterval(30)
+        self.update_timer.timeout.connect(self.update_display_text)
+        self.text_dirty = False
+
     def handle_link(self, url):
         pass
 
@@ -615,21 +843,26 @@ class StreamingMessageBubble(QFrame):
 
     def start_streaming(self):
         self.typing_indicator.setVisible(True)
+        self.update_timer.start()
 
     def stop_streaming(self):
         self.typing_indicator.setVisible(False)
+        self.update_timer.stop()
+        self.update_display_text()
 
     def add_text_chunk(self, chunk):
         self.full_text += chunk
-        self.update_display_text()
+        self.text_dirty = True
 
     def set_complete_text(self, text):
         self.full_text = text
-        self.update_display_text()
         self.stop_streaming()
+        self.update_display_text()
 
     def update_display_text(self):
-        self.label.setText(self.full_text)
+        if self.text_dirty or self.label.text() != self.full_text:
+            self.label.setText(self.full_text)
+            self.text_dirty = False
 
 
 class FileViewerDialog(QDialog):
@@ -720,6 +953,276 @@ class ImageViewerDialog(QDialog):
         )
 
         self.image_label.setPixmap(scaled)
+
+
+class ClickableVideoWidget(QVideoWidget):
+    """Custom VideoWidget to handle mouse clicks for Play/Pause"""
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class VideoPlayerDialog(QDialog):
+    def __init__(self, video_path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Media Player - {os.path.basename(video_path)}")
+        self.resize(900, 650)
+        self.setStyleSheet("""
+            QDialog { background-color: #1e1e1e; color: white; }
+            QLabel { color: #ddd; font-family: 'Segoe UI', sans-serif; }
+            QToolTip { background-color: #333; color: white; border: 1px solid #555; }
+        """)
+
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)
+
+        self.video_container = QWidget()
+        self.video_container.setStyleSheet("background-color: black;")
+        video_layout = QVBoxLayout(self.video_container)
+        video_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.video_widget = ClickableVideoWidget()
+        self.video_widget.clicked.connect(self.toggle_playback)
+        video_layout.addWidget(self.video_widget)
+        self.layout.addWidget(self.video_container, stretch=1)
+
+        self.controls_widget = QWidget()
+        self.controls_widget.setStyleSheet("""
+            QWidget { background-color: #2b2b2b; border-top: 1px solid #3d3d3d; }
+            QPushButton { 
+                background-color: transparent; 
+                border: none; 
+                border-radius: 4px; 
+                padding: 4px;
+                color: #ddd;
+            }
+            QPushButton:hover { background-color: #3d3d3d; }
+        """)
+        self.controls_layout = QVBoxLayout(self.controls_widget)
+        self.controls_layout.setContentsMargins(15, 10, 15, 15)
+
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.slider.setStyleSheet("""
+            QSlider::groove:horizontal { 
+                border: 1px solid #3d3d3d; 
+                height: 6px; 
+                background: #1a1a1a; 
+                border-radius: 3px; 
+            }
+            QSlider::handle:horizontal { 
+                background: #32CD32; 
+                width: 16px; 
+                height: 16px; 
+                margin: -6px 0; 
+                border-radius: 8px; 
+            }
+            QSlider::handle:horizontal:hover { background: #40E0D0; }
+            QSlider::sub-page:horizontal { background: #32CD32; border-radius: 3px; }
+        """)
+        self.slider.sliderMoved.connect(self.set_position)
+        self.slider.sliderPressed.connect(self.slider_pressed)
+        self.slider.sliderReleased.connect(self.slider_released)
+        self.controls_layout.addWidget(self.slider)
+
+        h_controls = QHBoxLayout()
+        h_controls.setSpacing(15)
+
+        self.play_btn = QPushButton("\uE768")
+        self.play_btn.setFixedSize(32, 32)
+        self.play_btn.setFont(QFont("Segoe MDL2 Assets", 16))
+        self.play_btn.setStyleSheet("font-weight: normal;")
+        self.play_btn.clicked.connect(self.toggle_playback)
+        h_controls.addWidget(self.play_btn)
+
+        self.time_label = QLabel("00:00 / 00:00")
+        self.time_label.setStyleSheet("font-family: monospace; font-size: 12px; color: #aaa;")
+        h_controls.addWidget(self.time_label)
+
+        h_controls.addStretch()
+
+        self.speed_combo = QComboBox()
+        self.speed_combo.addItems(["0.5x", "1.0x", "1.5x", "2.0x"])
+        self.speed_combo.setCurrentIndex(1)
+        self.speed_combo.setFixedWidth(80)
+        self.speed_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.speed_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #404040;
+                color: #ffffff;
+                border: 1px solid #555;
+                border-radius: 6px;
+                padding: 6px 15px;
+                font-size: 13px;
+            }
+            QComboBox:hover {
+                background-color: #4a4a4a;
+                border: 1px solid #32CD32;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 6px solid #aaaaaa;
+                margin-right: 8px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #353535;
+                color: white;
+                border: 1px solid #32CD32;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 5px;
+                min-height: 25px;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item:selected,
+            QComboBox QAbstractItemView::item:focus {
+                background-color: #32CD32;
+                color: white;
+            }
+        """)
+        self.speed_combo.currentTextChanged.connect(self.change_speed)
+        h_controls.addWidget(self.speed_combo)
+
+        self.vol_icon = QPushButton("\uE767")
+        self.vol_icon.setFont(QFont("Segoe MDL2 Assets", 16))
+        self.vol_icon.clicked.connect(self.toggle_mute)
+        self.vol_icon.setFixedSize(30, 30)
+        h_controls.addWidget(self.vol_icon)
+
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setFixedWidth(100)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(70)
+        self.volume_slider.setStyleSheet("""
+            QSlider::groove:horizontal { height: 4px; background: #555; border-radius: 2px; }
+            QSlider::handle:horizontal { background: #ddd; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }
+            QSlider::sub-page:horizontal { background: #ddd; border-radius: 2px; }
+        """)
+        self.volume_slider.valueChanged.connect(self.set_volume)
+        h_controls.addWidget(self.volume_slider)
+
+        self.controls_layout.addLayout(h_controls)
+        self.layout.addWidget(self.controls_widget)
+
+        self.player = QMediaPlayer()
+        self.audio_output = QAudioOutput()
+        self.player.setAudioOutput(self.audio_output)
+        self.player.setVideoOutput(self.video_widget)
+
+        self.player.positionChanged.connect(self.position_changed)
+        self.player.durationChanged.connect(self.duration_changed)
+        self.player.mediaStatusChanged.connect(self.media_status_changed)
+        self.player.errorOccurred.connect(self.handle_errors)
+
+        self.audio_output.setVolume(0.7)
+        self.player.setSource(QUrl.fromLocalFile(video_path))
+        self.player.play()
+        self.play_btn.setText("\uE769")
+
+        self.is_slider_dragged = False
+        self.duration = 0
+
+    def keyPressEvent(self, event):
+        """Keyboard Shortcuts"""
+        if event.key() == Qt.Key.Key_Space:
+            self.toggle_playback()
+        elif event.key() == Qt.Key.Key_Right:
+            self.player.setPosition(self.player.position() + 5000)
+        elif event.key() == Qt.Key.Key_Left:
+            self.player.setPosition(self.player.position() - 5000)
+        elif event.key() == Qt.Key.Key_Up:
+            self.volume_slider.setValue(self.volume_slider.value() + 5)
+        elif event.key() == Qt.Key.Key_Down:
+            self.volume_slider.setValue(self.volume_slider.value() - 5)
+        elif event.key() == Qt.Key.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+    def toggle_playback(self):
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+            self.play_btn.setText("\uE768")
+        else:
+            self.player.play()
+            self.play_btn.setText("\uE769")
+
+    def toggle_mute(self):
+        if self.audio_output.isMuted():
+            self.audio_output.setMuted(False)
+            self.vol_icon.setText("\uE767")
+            self.volume_slider.setEnabled(True)
+        else:
+            self.audio_output.setMuted(True)
+            self.vol_icon.setText("\uE74F")
+            self.volume_slider.setEnabled(False)
+
+    def change_speed(self, text):
+        rate = float(text.replace("x", ""))
+        self.player.setPlaybackRate(rate)
+
+    def set_volume(self, value):
+        self.audio_output.setVolume(value / 100)
+        if value == 0:
+            self.vol_icon.setText("\uE74F")
+        else:
+            self.vol_icon.setText("\uE767")
+
+    def media_status_changed(self, status):
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self.play_btn.setText("\uE768")
+
+    def slider_pressed(self):
+        self.is_slider_dragged = True
+
+    def slider_released(self):
+        self.is_slider_dragged = False
+        self.player.setPosition(self.slider.value())
+
+    def set_position(self, position):
+        if self.is_slider_dragged:
+            self.update_time_label(position)
+
+    def position_changed(self, position):
+        if not self.is_slider_dragged:
+            self.slider.setValue(position)
+            self.update_time_label(position)
+
+    def duration_changed(self, duration):
+        self.duration = duration
+        self.slider.setRange(0, duration)
+        self.update_time_label(self.player.position())
+
+    def update_time_label(self, position):
+        def fmt(ms):
+            seconds = (ms // 1000) % 60
+            minutes = (ms // 60000)
+            return f"{minutes:02}:{seconds:02}"
+
+        self.time_label.setText(f"{fmt(position)} / {fmt(self.duration)}")
+
+    def handle_errors(self):
+        self.play_btn.setEnabled(False)
+        self.time_label.setText("Error: Could not load media")
+
+    def closeEvent(self, event):
+        self.player.stop()
+        self.player.setSource(QUrl())
+        self.player.setVideoOutput(None)
+        self.player.deleteLater()
+        self.audio_output.deleteLater()
+        super().closeEvent(event)
 
 
 class PromptEditorDialog(QDialog):
@@ -817,7 +1320,7 @@ class AIChatApp(QMainWindow):
         sidebar_layout.addWidget(self.new_chat_btn)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("🔍 Search chats...")
+        self.search_input.setPlaceholderText("🔎︎ Search chats...")
         self.search_input.setStyleSheet("""
             QLineEdit { background-color: #333; color: white; border: 1px solid #444; border-radius: 5px; padding: 5px; }
             QLineEdit:focus { border: 1px solid #32CD32; }
@@ -944,7 +1447,7 @@ class AIChatApp(QMainWindow):
         self.prompt_btn.clicked.connect(self.open_prompt_editor)
         self.prompt_btn.setStyleSheet(self.header_btn_style())
 
-        self.workspace_btn = QPushButton(f"📁 {WORKSPACE_FOLDER}")
+        self.workspace_btn = QPushButton(f"🗁 {WORKSPACE_FOLDER}")
         self.workspace_btn.clicked.connect(self.open_workspace_folder)
         self.workspace_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.workspace_btn.setStyleSheet(self.header_btn_style())
@@ -1036,6 +1539,32 @@ class AIChatApp(QMainWindow):
             first_chat_id = list(self.all_chats.keys())[0]
             self.load_chat_by_id(first_chat_id)
 
+        MDL2_ICONS = {
+            'attach': '\uE723',
+            'folder': '\uE8B7',
+            'settings': '\uE713',
+            'new': '\uE710',
+            'search': '\uE721',
+            'file': '\uE8A5',
+            'image': '\uE91B',
+            'video': '\uE714',
+            'delete': '\uE74D',
+        }
+
+        self.attach_btn.setFont(QFont("Segoe MDL2 Assets", 16))
+        self.attach_btn.setText(MDL2_ICONS['attach'])
+
+        self.settings_btn.setFont(QFont("Segoe MDL2 Assets", 13))
+        self.settings_btn.setText(f"{MDL2_ICONS['settings']} Settings")
+
+        self.prompt_btn.setFont(QFont("Segoe MDL2 Assets", 13))
+        self.prompt_btn.setText(f"{MDL2_ICONS['settings']} Settings")
+
+        #self.workspace_btn.setFont(QFont("Segoe MDL2 Assets", 13))
+        #self.workspace_btn.setText(f"{MDL2_ICONS['folder']} {WORKSPACE_FOLDER}")
+
+
+
     def open_settings(self):
         dialog = SettingsDialog(self)
         dialog.exec()
@@ -1104,15 +1633,26 @@ class AIChatApp(QMainWindow):
 
     def process_file_path(self, path):
         ext = os.path.splitext(path)[1].lower()
-        attachment = {"path": os.path.basename(path), "content": None, "is_image": False}
+        attachment = {"path": os.path.basename(path), "content": None, "is_image": False, "is_video": False}
 
-        if ext in ['.png', '.jpg', '.jpeg']:
-            saved_path = FileManager.save_image_from_bytes(open(path, "rb").read())
+        if FileConverter.is_image(path):
+            saved_path = FileManager.save_media_from_bytes(open(path, "rb").read(), ext)
             if saved_path:
                 attachment["content"] = saved_path
                 attachment["is_image"] = True
             else:
                 QMessageBox.warning(self, "Error", "Could not process image.")
+                return
+        elif FileConverter.is_video(path):
+            saved_path = FileManager.save_media_from_bytes(open(path, "rb").read(), ext)
+            if saved_path:
+                attachment["content"] = saved_path
+                attachment["is_video"] = True
+                thumb = FileConverter.get_video_thumbnail(os.path.join(WORKSPACE_FOLDER, saved_path))
+                if thumb:
+                    attachment["thumbnail"] = thumb
+            else:
+                QMessageBox.warning(self, "Error", "Could not process video.")
                 return
         else:
             content = FileConverter.convert(path)
@@ -1192,12 +1732,13 @@ class AIChatApp(QMainWindow):
             qimage.save(buffer, "PNG")
             image_bytes = byte_array.data()
 
-            saved_path = FileManager.save_image_from_bytes(image_bytes)
+            saved_path = FileManager.save_media_from_bytes(image_bytes, ".png")
             if saved_path:
                 attachment = {
                     "path": "pasted_image.png",
                     "content": saved_path,
                     "is_image": True,
+                    "is_video": False,
                     "qimage": qimage
                 }
                 self.current_attachments.append(attachment)
@@ -1226,7 +1767,7 @@ class AIChatApp(QMainWindow):
             preview_layout.setContentsMargins(5, 5, 5, 5)
             preview_layout.setSpacing(3)
 
-            if attachment["is_image"]:
+            if attachment.get("is_image", False):
                 img_label = QLabel()
                 img_label.setFixedSize(50, 50)
                 img_label.setScaledContents(True)
@@ -1240,6 +1781,35 @@ class AIChatApp(QMainWindow):
                 img_label.setPixmap(pixmap.scaled(50, 50, Qt.AspectRatioMode.KeepAspectRatio,
                                                   Qt.TransformationMode.SmoothTransformation))
                 preview_layout.addWidget(img_label)
+            elif attachment.get("is_video", False):
+                icon_label = QLabel()
+                icon_label.setFixedSize(50, 50)
+                icon_label.setScaledContents(True)
+                icon_label.setStyleSheet("border: 1px solid #555; border-radius: 3px;")
+
+                if "thumbnail" in attachment and attachment["thumbnail"]:
+                    pixmap = attachment["thumbnail"]
+                    overlay = QPixmap(pixmap.size())
+                    overlay.fill(Qt.GlobalColor.transparent)
+                    painter = QPainter(overlay)
+                    painter.drawPixmap(0, 0, pixmap)
+                    painter.setBrush(QColor(0, 0, 0, 128))
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.drawRect(overlay.rect())
+                    painter.setPen(QColor(255, 255, 255))
+                    font = painter.font()
+                    font.setPointSize(24)
+                    painter.setFont(font)
+                    painter.drawText(overlay.rect(), Qt.AlignmentFlag.AlignCenter, "▶")
+                    painter.end()
+                    icon_label.setPixmap(overlay.scaled(50, 50, Qt.AspectRatioMode.KeepAspectRatio,
+                                                        Qt.TransformationMode.SmoothTransformation))
+                else:
+                    icon_label.setText("🎥")
+                    icon_label.setStyleSheet("font-size: 30px; border: 1px solid #555; border-radius: 3px;")
+                    icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+                preview_layout.addWidget(icon_label)
             else:
                 file_icon = QLabel("📄")
                 file_icon.setStyleSheet("font-size: 30px;")
@@ -1251,20 +1821,31 @@ class AIChatApp(QMainWindow):
             name_label.setStyleSheet("color: #aaa; font-size: 10px;")
             name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             name_label.setWordWrap(True)
-            name_label.setMaximumWidth(50)
+            name_label.setMaximumWidth(60)
             preview_layout.addWidget(name_label)
 
             remove_btn = QPushButton("×")
-            remove_btn.setFixedSize(20, 20)
+            remove_btn.setToolTip("Remove attachment")
+            remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            remove_btn.setFixedSize(18, 18)
             remove_btn.setStyleSheet("""
                 QPushButton {
-                    background-color: #c0392b;
-                    color: white;
-                    border-radius: 10px;
-                    font-weight: bold;
+                    background-color: rgba(0, 0, 0, 0);
+                    color: rgba(255, 255, 255, 0.65);
+                    border: 1px solid rgba(255, 255, 255, 0.18);
+                    border-radius: 9px;
+                    font-weight: 700;
+                    font-size: 13px;
+                    padding: 0px;
                 }
                 QPushButton:hover {
-                    background-color: #e74c3c;
+                    background-color: rgba(231, 76, 60, 0.18);
+                    border: 1px solid rgba(231, 76, 60, 0.55);
+                    color: rgba(255, 255, 255, 0.95);
+                }
+                QPushButton:pressed {
+                    background-color: rgba(231, 76, 60, 0.28);
+                    border: 1px solid rgba(231, 76, 60, 0.75);
                 }
             """)
             remove_btn.clicked.connect(lambda checked, i=idx: self.remove_attachment(i))
@@ -1336,7 +1917,14 @@ class AIChatApp(QMainWindow):
                 child.widget().deleteLater()
 
         messages = self.all_chats[chat_id]["messages"]
+
+        skip_counter = 0
+
         for idx, msg in enumerate(messages):
+            if skip_counter > 0:
+                skip_counter -= 1
+                continue
+
             try:
                 content = msg["content"]
                 role = msg["role"]
@@ -1347,122 +1935,94 @@ class AIChatApp(QMainWindow):
 
                 if role == "user":
                     display_text = ""
-                    image_data_list = []
+                    media_data_list = []
 
-                    if isinstance(content, list):
+                    str_content_for_check = ""
+                    if isinstance(content, str):
+                        str_content_for_check = content
+                    elif isinstance(content, list):
                         for part in content:
-                            if isinstance(part, dict):
-                                if part.get("type") == "text":
-                                    text_content = part.get("text", "")
-                                    if "[ATTACHED FILE:" in text_content:
-                                        lines = text_content.split("\n")
-                                        clean_lines = []
-                                        in_file_section = False
-                                        for line in lines:
-                                            if line.startswith("[ATTACHED FILE:"):
-                                                in_file_section = True
-                                                filename = line.replace("[ATTACHED FILE:", "").replace("]", "").strip()
-                                                clean_lines.append(f"\n📄 [{filename}]")
-                                            elif line.startswith("[END FILE]"):
-                                                in_file_section = False
-                                            elif not in_file_section:
-                                                clean_lines.append(line)
-                                        display_text += "\n".join(clean_lines)
-                                    else:
-                                        display_text += text_content
+                            if part.get("type") == "text":
+                                str_content_for_check += part.get("text", "")
+                            elif part.get("type") == "image_url":
+                                url = part.get("image_url", {}).get("url", "")
+                                if "base64," in url:
+                                    media_data_list.append({"type": "image", "data": url.split("base64,")[1]})
+                                elif not url.startswith("http"):
+                                    full_path = os.path.join(WORKSPACE_FOLDER, url)
+                                    if os.path.exists(full_path):
+                                        b64 = FileConverter.encode_media_base64(full_path)
+                                        if b64: media_data_list.append({"type": "image", "data": b64})
+                            elif part.get("type") == "video_url":
+                                url = part.get("video_url", {}).get("url", "")
 
-                                elif part.get("type") == "image_url":
-                                    url = part.get("image_url", {}).get("url", "")
-                                    if "base64," in url:
-                                        image_data_list.append(url.split("base64,")[1])
-                                    elif not url.startswith("http"):
-                                        full_path = os.path.join(WORKSPACE_FOLDER, url)
-                                        if os.path.exists(full_path):
-                                            b64 = FileConverter.encode_image_base64(full_path)
-                                            if b64:
-                                                image_data_list.append(b64)
-                                        else:
-                                            print(f"Warning: Image not found: {full_path}")
-                    else:
-                        display_text = content
-                        if "[ATTACHED FILE:" in display_text:
-                            lines = display_text.split("\n")
-                            clean_lines = []
-                            in_file_section = False
-                            for line in lines:
-                                if line.startswith("[ATTACHED FILE:"):
-                                    in_file_section = True
-                                    filename = line.replace("[ATTACHED FILE:", "").replace("]", "").strip()
-                                    clean_lines.append(f"\n📄 [{filename}]")
-                                elif line.startswith("[END FILE]"):
-                                    in_file_section = False
-                                elif not in_file_section:
-                                    clean_lines.append(line)
-                            display_text = "\n".join(clean_lines)
+                                if not url.startswith("data:") and not url.startswith("http"):
+                                    full_path = os.path.join(WORKSPACE_FOLDER, url)
+                                    if os.path.exists(full_path):
+                                        media_data_list.append({"type": "video", "path": full_path})
+                                        fname = os.path.basename(full_path)
+                                        if f"🎥 [Video: {fname}]" not in str_content_for_check:
+                                            pass
+                                            #str_content_for_check += f"\n🎥 [Video: {fname}]"
 
-                    self.add_message_block("user", display_text, image_data_list=image_data_list)
+                    if idx + 1 < len(messages):
+                        next_msg = messages[idx + 1]
+                        next_content = next_msg.get("content", "")
+                        next_str = ""
+                        if isinstance(next_content, str):
+                            next_str = next_content
+                        elif isinstance(next_content, list):
+                            for p in next_content:
+                                if p.get("type") == "text": next_str += p.get("text", "")
+
+                        chunk_match = re.search(r"\[ATTACHED FILE: (.*?) - Part 1/(\d+)\]", next_str)
+                        if chunk_match:
+                            filename = chunk_match.group(1)
+                            total_parts = int(chunk_match.group(2))
+                            display_text = self._clean_file_tags(str_content_for_check)
+                            display_text += f"\n\n📄 [{filename}]"
+                            self.add_message_block("user", display_text, media_data_list=media_data_list)
+                            skip_counter = total_parts
+                            continue
+
+                    chunk_match = re.search(r"\[ATTACHED FILE: (.*?) - Part (\d+)/(\d+)\]", str_content_for_check)
+                    if chunk_match:
+                        filename = chunk_match.group(1)
+                        curr_p = int(chunk_match.group(2))
+                        total_p = int(chunk_match.group(3))
+                        if curr_p == 1:
+                            self.add_message_block("user", f"📄 [{filename}]", media_data_list=media_data_list)
+                            skip_counter = total_p - curr_p
+                            continue
+
+                    display_text = self._clean_file_tags(str_content_for_check)
+                    self.add_message_block("user", display_text, media_data_list=media_data_list)
 
                 elif role == "assistant":
                     if isinstance(content, list):
                         text_content = ""
                         has_images = False
-
                         for part in content:
                             if part.get("type") == "text":
                                 text_content += part.get("text", "")
                             elif part.get("type") == "image_url":
                                 has_images = True
                                 url = part.get("image_url", {}).get("url", "")
-
-                                b64 = None
-                                if "base64," in url:
-                                    b64 = url.split("base64,")[1]
-                                elif not url.startswith("http"):
-                                    full_path = os.path.join(WORKSPACE_FOLDER, url)
-                                    if os.path.exists(full_path):
-                                        b64 = FileConverter.encode_image_base64(full_path)
-
-                                if b64:
-                                    container = QWidget()
-                                    h_layout = QHBoxLayout(container)
-                                    h_layout.setContentsMargins(0, 0, 0, 0)
-                                    h_layout.setSpacing(0)
-
-                                    image_widget = self.create_image_preview(b64, "assistant")
-                                    h_layout.addWidget(image_widget)
-                                    h_layout.addStretch()
-
-                                    self.chat_layout.addWidget(container)
-                                    self.chat_layout.addSpacing(6)
+                                b64 = self._get_b64_from_url(url)
+                                if b64: self._add_assistant_image(b64)
 
                         if text_content.strip():
                             self.add_message_block("assistant", text_content)
-
-                        if has_images:
-                            continue
+                        if has_images: continue
 
                     elif "🖼️ Generated image:" in str(content):
                         image_path_match = re.search(r'images/[a-f0-9\-]+\.png', content)
                         if image_path_match:
-                            image_path = image_path_match.group()
-                            full_path = os.path.join(WORKSPACE_FOLDER, image_path)
-                            if os.path.exists(full_path):
-                                b64 = FileConverter.encode_image_base64(full_path)
-                                if b64:
-                                    container = QWidget()
-                                    h_layout = QHBoxLayout(container)
-                                    h_layout.setContentsMargins(0, 0, 0, 0)
-                                    h_layout.setSpacing(0)
-
-                                    image_widget = self.create_image_preview(b64, "assistant")
-                                    h_layout.addWidget(image_widget)
-                                    h_layout.addStretch()
-
-                                    self.chat_layout.addWidget(container)
-                                    self.chat_layout.addSpacing(6)
-                                    continue
-                            else:
-                                print(f"Warning: Generated image not found: {full_path}")
+                            full_path = os.path.join(WORKSPACE_FOLDER, image_path_match.group())
+                            b64 = FileConverter.encode_media_base64(full_path)
+                            if b64:
+                                self._add_assistant_image(b64)
+                                continue
 
                     if isinstance(content, str):
                         self.add_message_block("assistant", content)
@@ -1480,9 +2040,101 @@ class AIChatApp(QMainWindow):
             if item.data(Qt.ItemDataRole.UserRole) == chat_id:
                 item.setSelected(True)
                 break
-
         QTimer.singleShot(100, lambda: self.chat_area.verticalScrollBar().setValue(
             self.chat_area.verticalScrollBar().maximum()))
+
+    def _clean_file_tags(self, text):
+        if "[ATTACHED FILE:" not in text: return text
+        lines = text.split("\n")
+        clean = []
+        in_file = False
+        for line in lines:
+            if line.startswith("[ATTACHED FILE:"):
+                in_file = True
+                fname = line.replace("[ATTACHED FILE:", "").replace("]", "").strip().split(" - Part")[0]
+                clean.append(f"📄 [{fname}]")
+            elif line.startswith("[END FILE]"):
+                in_file = False
+            elif not in_file:
+                clean.append(line)
+        return "\n".join(clean)
+
+    def _get_b64_from_url(self, url):
+        if "base64," in url: return url.split("base64,")[1]
+        if not url.startswith("http"):
+            full_path = os.path.join(WORKSPACE_FOLDER, url)
+            if os.path.exists(full_path): return FileConverter.encode_media_base64(full_path)
+        return None
+
+    def _add_assistant_image(self, b64):
+        container = QWidget()
+        h_layout = QHBoxLayout(container)
+        h_layout.setContentsMargins(0, 0, 0, 0)
+        image_widget = self.create_image_preview({"type": "image", "data": b64}, "assistant")
+        h_layout.addWidget(image_widget)
+        h_layout.addStretch()
+        self.chat_layout.addWidget(container)
+        self.chat_layout.addSpacing(6)
+
+    def reconstruct_chunked_file(self, filename, messages):
+        """Helper to stitch together split file chunks from history"""
+        full_content = []
+        found_parts = {}
+        total_parts = 0
+
+        escaped_name = re.escape(filename)
+        header_pattern = re.compile(r'\[ATTACHED FILE: ' + escaped_name + r' - Part (\d+)/(\d+)\]\n(.*?)\n\[END FILE\]',
+                                    re.DOTALL)
+
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                text_content = ""
+                for part in content:
+                    if part.get("type") == "text":
+                        text_content += part.get("text", "")
+                content = text_content
+
+            match = header_pattern.search(str(content))
+            if match:
+                part_idx = int(match.group(1))
+                total_parts = int(match.group(2))
+                file_content = match.group(3)
+                found_parts[part_idx] = file_content
+
+        if found_parts:
+            for i in range(1, total_parts + 1):
+                if i in found_parts:
+                    full_content.append(found_parts[i])
+            return "".join(full_content)
+
+        return None
+
+    def find_file_content_in_history(self, filename):
+        if not self.current_chat_id or self.current_chat_id not in self.all_chats:
+            return None
+
+        messages = self.all_chats[self.current_chat_id]["messages"]
+
+        chunked_content = self.reconstruct_chunked_file(filename, messages)
+        if chunked_content:
+            return chunked_content
+
+        for msg in reversed(messages):
+            content = msg.get("content", "")
+
+            if isinstance(content, list):
+                text_content = ""
+                for part in content:
+                    if part.get("type") == "text":
+                        text_content += part.get("text", "")
+                content = text_content
+
+            pattern = r'\[ATTACHED FILE: ' + re.escape(filename) + r'\]\n(.*?)\n\[END FILE\]'
+            match = re.search(pattern, content, re.DOTALL)
+            if match:
+                return match.group(1)
+        return None
 
     def save_current_chat(self):
         if self.current_chat_id and self.current_chat_id in self.all_chats:
@@ -1624,7 +2276,7 @@ class AIChatApp(QMainWindow):
             QMessageBox.information(self, "Info", "System prompt updated for this chat.")
 
     def attach_file(self):
-        file_filter = "All Files (*);;Text Files (*.txt *.md *.py);;PDF (*.pdf);;Word (*.docx);;Images (*.png *.jpg *.jpeg)"
+        file_filter = "All Supported (*.txt *.md *.py *.js *.html *.css *.json *.pdf *.docx *.png *.jpg *.jpeg *.mp4 *.avi *.mov *.mkv *.webm);;All Files (*)"
         path, _ = QFileDialog.getOpenFileName(self, "Attach File", filter=file_filter)
         if path:
             self.process_file_path(path)
@@ -1633,7 +2285,7 @@ class AIChatApp(QMainWindow):
         self.current_attachments = []
         self.update_attachment_preview()
 
-    def add_message_block(self, sender, text=None, streaming=False, image_data_list=None):
+    def add_message_block(self, sender, text=None, streaming=False, media_data_list=None):
         if streaming and sender == "assistant":
             bubble = StreamingMessageBubble(sender)
             bubble.start_streaming()
@@ -1648,9 +2300,9 @@ class AIChatApp(QMainWindow):
         v_layout.setContentsMargins(0, 0, 0, 0)
         v_layout.setSpacing(5)
 
-        if image_data_list:
-            for image_data in image_data_list:
-                image_widget = self.create_image_preview(image_data, sender)
+        if media_data_list:
+            for media_data in media_data_list:
+                image_widget = self.create_image_preview(media_data, sender)
                 if sender == "user":
                     image_container = QWidget()
                     h_img = QHBoxLayout(image_container)
@@ -1728,6 +2380,10 @@ class AIChatApp(QMainWindow):
         viewer = ImageViewerDialog(pixmap, self)
         viewer.exec()
 
+    def open_video_player(self, video_path):
+        player_dialog = VideoPlayerDialog(video_path, self)
+        player_dialog.exec()
+
     def handle_send_or_stop(self):
         if self.is_generating:
             self.stop_generation()
@@ -1737,7 +2393,13 @@ class AIChatApp(QMainWindow):
     def stop_generation(self):
         if self.thread and self.thread.isRunning():
             self.thread.stop()
-            self.thread.wait()
+            try:
+                self.thread.response_chunk.disconnect()
+                self.thread.response_complete.disconnect()
+                self.thread.error_occurred.disconnect()
+                self.thread.image_generated.disconnect()
+            except:
+                pass
 
         self.is_generating = False
         self.send_button.setText("Send")
@@ -1745,8 +2407,21 @@ class AIChatApp(QMainWindow):
             QPushButton { background-color: #32CD32; color: white; padding: 10px 20px; font-weight: bold; border-radius: 5px; }
             QPushButton:hover { background-color: #2ECC71; }
         """)
+
         if self.current_streaming_bubble:
             self.current_streaming_bubble.stop_streaming()
+
+            if not self.current_streaming_bubble.full_text.strip():
+                try:
+                    bubble_parent = self.current_streaming_bubble.parent()
+                    if bubble_parent:
+                        main_container = bubble_parent.parent()
+                        if main_container:
+                            main_container.deleteLater()
+                            self.chat_layout.removeWidget(main_container)
+                except Exception as e:
+                    print(f"Error removing empty bubble: {e}")
+
             self.current_streaming_bubble = None
 
     def send_message(self):
@@ -1760,7 +2435,7 @@ class AIChatApp(QMainWindow):
         self.update_chat_title_if_needed(user_text)
 
         display_text = user_text
-        attached_images_data_for_display = []
+        attached_media_data_for_display = []
 
         if self.current_attachments:
             chunked_files = []
@@ -1779,16 +2454,14 @@ class AIChatApp(QMainWindow):
                 content_parts.append({"type": "text", "text": user_text})
 
             for attachment in regular_attachments:
-                if attachment["is_image"]:
+                if attachment.get("is_image"):
                     if display_text:
-                        display_text += f"\n🖼️ [{attachment['path']}]"
-                    else:
-                        display_text = f"🖼️ [{attachment['path']}]"
+                        display_text += f"\n"
 
                     full_path = os.path.join(WORKSPACE_FOLDER, attachment["content"])
-                    b64 = FileConverter.encode_image_base64(full_path)
+                    b64 = FileConverter.encode_media_base64(full_path)
                     if b64:
-                        attached_images_data_for_display.append(b64)
+                        attached_media_data_for_display.append({"type": "image", "data": b64})
 
                     content_parts.append({
                         "type": "image_url",
@@ -1796,6 +2469,20 @@ class AIChatApp(QMainWindow):
                             "url": attachment["content"]
                         }
                     })
+                elif attachment.get("is_video"):
+                    if display_text:
+                        display_text += f"\n"
+
+                    full_path = os.path.join(WORKSPACE_FOLDER, attachment["content"])
+                    attached_media_data_for_display.append({"type": "video", "path": full_path})
+
+                    content_parts.append({
+                        "type": "video_url",
+                        "video_url": {
+                            "url": attachment["content"]
+                        }
+                    })
+
                 else:
                     if display_text:
                         display_text += f"\n📄 [{attachment['path']}]"
@@ -1812,7 +2499,7 @@ class AIChatApp(QMainWindow):
                     display_text = f"📄 [{attachment['path']}]"
 
             if regular_attachments:
-                if any(a["is_image"] for a in regular_attachments):
+                if any(a.get("is_image") or a.get("is_video") for a in regular_attachments):
                     if file_text_parts:
                         if not user_text:
                             content_parts.insert(0, {"type": "text", "text": "".join(file_text_parts)})
@@ -1845,7 +2532,7 @@ class AIChatApp(QMainWindow):
 
         self.input_field.clear()
 
-        self.add_message_block("user", display_text, image_data_list=attached_images_data_for_display)
+        self.add_message_block("user", display_text, media_data_list=attached_media_data_for_display)
 
         self.save_current_chat()
         self.trigger_assistant_response()
@@ -1899,7 +2586,7 @@ class AIChatApp(QMainWindow):
         h_layout.setContentsMargins(0, 0, 0, 0)
         h_layout.setSpacing(0)
 
-        image_widget = self.create_image_preview(base64_str, "assistant")
+        image_widget = self.create_image_preview({"type": "image", "data": base64_str}, "assistant")
         h_layout.addWidget(image_widget)
         h_layout.addStretch()
 
@@ -1911,14 +2598,26 @@ class AIChatApp(QMainWindow):
 
         self.save_current_chat()
 
-    def create_image_preview(self, base64_data, sender):
+    def create_image_preview(self, media_data, sender):
         try:
-            image_bytes = base64.b64decode(base64_data)
             pixmap = QPixmap()
-            success = pixmap.loadFromData(image_bytes)
+            is_video = False
 
-            if not success or pixmap.isNull():
-                error_label = QLabel("⚠️ Image load failed")
+            if media_data.get("type") == "image":
+                image_bytes = base64.b64decode(media_data["data"])
+                pixmap.loadFromData(image_bytes)
+            elif media_data.get("type") == "video":
+                is_video = True
+                path = media_data["path"]
+                thumb = FileConverter.get_video_thumbnail(path)
+                if thumb:
+                    pixmap = thumb
+                else:
+                    pixmap = QPixmap(250, 150)
+                    pixmap.fill(QColor("#333"))
+
+            if pixmap.isNull():
+                error_label = QLabel("⚠️ Media load failed")
                 error_label.setStyleSheet("color: #ff6b6b; padding: 10px;")
                 return error_label
 
@@ -1927,16 +2626,42 @@ class AIChatApp(QMainWindow):
 
             scaled_pixmap = pixmap.scaled(250, 250, Qt.AspectRatioMode.KeepAspectRatio,
                                           Qt.TransformationMode.SmoothTransformation)
-            image_label.setPixmap(scaled_pixmap)
+
+            if is_video:
+                overlay = QPixmap(scaled_pixmap.size())
+                overlay.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(overlay)
+                painter.drawPixmap(0, 0, scaled_pixmap)
+
+                painter.setBrush(QColor(0, 0, 0, 100))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRect(overlay.rect())
+
+                painter.setBrush(QColor(255, 255, 255, 200))
+                center = overlay.rect().center()
+                size = 30
+                triangle = QPolygonF([
+                    QPointF(center.x() - size / 2, center.y() - size / 2),
+                    QPointF(center.x() - size / 2, center.y() + size / 2),
+                    QPointF(center.x() + size / 2, center.y())
+                ])
+                painter.drawPolygon(triangle)
+                painter.end()
+                image_label.setPixmap(overlay)
+            else:
+                image_label.setPixmap(scaled_pixmap)
 
             image_label.setStyleSheet("border-radius: 8px; background-color: #333; border: 1px solid #444;")
 
-            image_label.clicked.connect(lambda: self.open_image_viewer(pixmap))
+            if is_video:
+                image_label.clicked.connect(lambda: self.open_video_player(media_data["path"]))
+            else:
+                image_label.clicked.connect(lambda: self.open_image_viewer(pixmap))
 
             return image_label
         except Exception as e:
-            print(f"Error displaying image: {e}")
-            error_label = QLabel("⚠️ Image error")
+            print(f"Error displaying media: {e}")
+            error_label = QLabel("⚠️ Media error")
             error_label.setStyleSheet("color: #ff6b6b; padding: 10px;")
             return error_label
 
@@ -1984,7 +2709,6 @@ class AIChatApp(QMainWindow):
 
             self.all_chats[self.current_chat_id]["messages"].append({"role": "system", "content": sys_msg})
 
-
             self.add_message_block("system", sys_msg)
 
         delete_pattern = re.compile(r':::delete file="(.*?)"(.*?):::')
@@ -2024,6 +2748,10 @@ class AIChatApp(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+
+    mono_font = QFont("Segoe UI Symbol", 10)
+    app.setFont(mono_font)
+
     window = AIChatApp()
     window.show()
     sys.exit(app.exec())
