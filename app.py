@@ -801,6 +801,7 @@ class StreamingMessageBubble(QFrame):
         self.label = ClickableLabel()
         self.label.setTextFormat(Qt.TextFormat.MarkdownText)
         self.label.setWordWrap(True)
+        self.label.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self.label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.LinksAccessibleByMouse)
         self.label.setFont(QFont("Segoe UI", 11))
@@ -866,7 +867,9 @@ class StreamingMessageBubble(QFrame):
         """)
         self.cancel_btn.clicked.connect(self.cancel_edit)
 
-        self.save_btn = QPushButton("Save & Update")
+        #Save & Update
+
+        self.save_btn = QPushButton("Update")
         self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.save_btn.setStyleSheet("""
             QPushButton {
@@ -910,22 +913,32 @@ class StreamingMessageBubble(QFrame):
     def contextMenuEvent(self, event):
         menu = QMenu(self)
         menu.setStyleSheet("""
-            QMenu { background-color: #333; color: white; border: 1px solid #555; }
-            QMenu::item { padding: 6px 20px; }
-            QMenu::item:selected { background-color: #32CD32; }
+            QMenu { 
+                background-color: #333333; 
+                color: white; 
+                border: 1px solid #555555;
+                padding: 5px;
+            }
+            QMenu::item { 
+                padding: 6px 20px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected { 
+                background-color: #32CD32; 
+            }
         """)
 
         copy_action = menu.addAction("Copy Text")
         menu.addSeparator()
 
         edit_action = None
-
+        
         if self.sender == "user":
-            edit_action = menu.addAction("✏️ Edit")
+            edit_action = menu.addAction("Edit")
 
         regen_action = None
         if self.sender == "assistant":
-            regen_action = menu.addAction("🔄 Regenerate")
+            regen_action = menu.addAction("Regenerate")
 
         action = menu.exec(event.globalPos())
 
@@ -954,7 +967,7 @@ class StreamingMessageBubble(QFrame):
 
         self.setStyleSheet("""
             QFrame { 
-                background-color: #505050; 
+                background-color: #383838; 
                 border-radius: 12px; 
                 border: 1px solid rgba(255,255,255,0.1);
             }
@@ -2466,8 +2479,21 @@ class AIChatApp(QMainWindow):
             self.open_file_viewer(fname, content)
         else:
             menu = QMenu(self)
-            menu.setStyleSheet(
-                """QMenu{background-color:#333;color:white;}QMenu::item:selected{background-color:#32CD32;}""")
+            menu.setStyleSheet("""
+                QMenu {
+                    background-color: #333; 
+                    color: white; 
+                    border: 1px solid #555;
+                    padding: 5px;
+                }
+                QMenu::item {
+                    padding: 6px 20px;
+                    border-radius: 4px;
+                }
+                QMenu::item:selected {
+                    background-color: #32CD32;
+                }
+            """)
             for f in matches:
                 action = menu.addAction(f)
                 action.triggered.connect(
