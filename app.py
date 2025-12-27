@@ -55,9 +55,9 @@ TEXT_MODELS_FAST = [
     "gemini-fast",
     "openai-fast",
     "grok",
-    "mistral",
-    "qwen-coder",
-    "llama",
+    #"mistral",
+    #"qwen-coder",
+    #"llama",
 ]
 
 TEXT_MODELS_LARGE = [
@@ -71,11 +71,11 @@ TEXT_MODELS_OTHER = [
     "gemini",
     "claude",
     "gemini-search",
-    "chickytutor",
-    "perplexity-fast",
-    "perplexity-reasoning",
-    "kimi-k2-thinking",
-    "deepseek",
+    #"chickytutor",
+    #"perplexity-fast",
+    #"perplexity-reasoning",
+    #"kimi-k2-thinking",
+    #"deepseek",
 ]
 
 IMAGE_MODELS = [
@@ -288,7 +288,6 @@ class FileConverter:
 
     @staticmethod
     def get_video_thumbnail(filepath):
-        """Extracts the first frame of a video using OpenCV and returns a QPixmap."""
         try:
             cap = cv2.VideoCapture(filepath)
             if not cap.isOpened():
@@ -312,9 +311,7 @@ class FileConverter:
 
     @staticmethod
     def extract_frames_for_api(filepath, max_frames=20, quality=70):
-        """
-        Extracts keyframes from a video to simulate 'watching' it.
-        """
+
         try:
             cap = cv2.VideoCapture(filepath)
             if not cap.isOpened():
@@ -683,14 +680,7 @@ class AIResponseThread(QThread):
                     return
 
     def prepare_messages_for_api(self, messages):
-        """
-        Scan messages for local file paths.
-        - Images: Convert to base64.
-        - Videos:
-            1. Extract Audio Transcript so AI 'hears' it.
-            2. If it's the LATEST message: Send visuals (Base64 or Frames).
-            3. If it's an OLD message: Remove visuals (save tokens), keep Transcript.
-        """
+
         api_messages = []
         total_msgs = len(messages)
 
@@ -786,6 +776,9 @@ class ClickableImageLabel(QLabel):
 
 
 class StreamingMessageBubble(QFrame):
+    edit_confirmed = pyqtSignal(str)
+    regenerate_requested = pyqtSignal()
+
     def __init__(self, sender="assistant", text=""):
         super().__init__()
         self.sender = sender
@@ -794,11 +787,16 @@ class StreamingMessageBubble(QFrame):
 
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setStyleSheet(self._bubble_style())
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(12, 12, 12, 12)
         self.layout.setSpacing(5)
+
+        self.display_widget = QWidget()
+        self.display_widget.setStyleSheet("background-color: transparent;")
+        self.display_layout = QVBoxLayout(self.display_widget)
+        self.display_layout.setContentsMargins(0, 0, 0, 0)
 
         self.label = ClickableLabel()
         self.label.setTextFormat(Qt.TextFormat.MarkdownText)
@@ -806,31 +804,185 @@ class StreamingMessageBubble(QFrame):
         self.label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.LinksAccessibleByMouse)
         self.label.setFont(QFont("Segoe UI", 11))
-        self.label.setStyleSheet("color: white; border: none;")
+
+        self.label.setStyleSheet("QLabel { color: white; background-color: transparent; border: none; }")
         self.label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         self.label.setText(text)
         self.label.linkActivated.connect(self.handle_link)
 
-        self.layout.addWidget(self.label)
+        self.display_layout.addWidget(self.label)
 
         self.typing_indicator = QLabel("...")
-        self.typing_indicator.setStyleSheet("color: rgba(255, 255, 255, 0.5); font-style: italic;")
+        self.typing_indicator.setStyleSheet(
+            "color: rgba(255, 255, 255, 0.7); font-style: italic; background-color: transparent; border: none; ")
         self.typing_indicator.setVisible(False)
-        self.layout.addWidget(self.typing_indicator)
+        self.display_layout.addWidget(self.typing_indicator)
 
-        self.setMaximumWidth(650)
+        self.layout.addWidget(self.display_widget)
+
+        self.edit_widget = QWidget()
+        self.edit_widget.setVisible(False)
+        self.edit_widget.setStyleSheet("background-color: transparent;")
+
+        self.edit_layout = QVBoxLayout(self.edit_widget)
+        self.edit_layout.setContentsMargins(8, 8, 8, 8)
+        self.edit_layout.setSpacing(8)
+
+        self.text_editor = QTextEdit()
+        self.text_editor.setStyleSheet("""
+            QTextEdit {
+                background-color: #2b2b2b; 
+                color: #ffffff; 
+                border: 1px solid #555; 
+                border-radius: 6px;
+                font-family: 'Segoe UI';
+                font-size: 11pt;
+                padding: 6px;
+            }
+            QTextEdit:focus {
+                border: 1px solid #32CD32;
+            }
+        """)
+        self.text_editor.setAcceptRichText(False)
+
+        self.edit_layout.addWidget(self.text_editor)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        btn_row.addStretch()
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #444; 
+                color: white; 
+                border: 1px solid #555; 
+                padding: 6px 15px; 
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #555; border: 1px solid #777; }
+        """)
+        self.cancel_btn.clicked.connect(self.cancel_edit)
+
+        self.save_btn = QPushButton("Save & Update")
+        self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #32CD32; 
+                color: white; 
+                border: none; 
+                padding: 6px 15px; 
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #2ECC71; }
+        """)
+        self.save_btn.clicked.connect(self.save_edit)
+
+        btn_row.addWidget(self.cancel_btn)
+        btn_row.addWidget(self.save_btn)
+        self.edit_layout.addLayout(btn_row)
+
+        self.layout.addWidget(self.edit_widget)
+
+        self.setMaximumWidth(700)
 
         self.update_timer = QTimer()
         self.update_timer.setInterval(30)
         self.update_timer.timeout.connect(self.update_display_text)
         self.text_dirty = False
 
-    def handle_link(self, url):
-        pass
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
+        self.text_editor.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj == self.text_editor and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Return and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                self.save_edit()
+                return True
+            if event.key() == Qt.Key.Key_Escape:
+                self.cancel_edit()
+                return True
+        return super().eventFilter(obj, event)
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #333; color: white; border: 1px solid #555; }
+            QMenu::item { padding: 6px 20px; }
+            QMenu::item:selected { background-color: #32CD32; }
+        """)
+
+        copy_action = menu.addAction("Copy Text")
+        menu.addSeparator()
+
+        edit_action = None
+
+        if self.sender == "user":
+            edit_action = menu.addAction("✏️ Edit")
+
+        regen_action = None
+        if self.sender == "assistant":
+            regen_action = menu.addAction("🔄 Regenerate")
+
+        action = menu.exec(event.globalPos())
+
+        if action == copy_action:
+            QApplication.clipboard().setText(self.full_text)
+        elif edit_action and action == edit_action:
+            self.start_edit_mode()
+        elif regen_action and action == regen_action:
+            self.regenerate_requested.emit()
+
+    def start_edit_mode(self):
+        self.display_widget.setVisible(False)
+        self.edit_widget.setVisible(True)
+        self.text_editor.setText(self.full_text)
+
+        line_count = self.full_text.count('\n') + 1
+        text_height = min(100, max(60, line_count * 20))
+        self.text_editor.setFixedHeight(text_height)
+
+        self.edit_widget.setMaximumHeight(text_height + 80)
+
+        self.text_editor.setFocus()
+
+        if not hasattr(self, '_original_style'):
+            self._original_style = self._bubble_style()
+
+        self.setStyleSheet("""
+            QFrame { 
+                background-color: #505050; 
+                border-radius: 12px; 
+                border: 1px solid rgba(255,255,255,0.1);
+            }
+        """)
+
+    def save_edit(self):
+        new_text = self.text_editor.toPlainText().strip()
+        if new_text and new_text != self.full_text:
+            self.edit_confirmed.emit(new_text)
+        self.cancel_edit()
+
+        if hasattr(self, '_original_style'):
+            self.setStyleSheet(self._original_style)
+        else:
+            self.setStyleSheet(self._bubble_style())
+
+    def cancel_edit(self):
+        self.edit_widget.setVisible(False)
+        self.display_widget.setVisible(True)
+
+        self.edit_widget.setMaximumHeight(16777215)
+        if hasattr(self, '_original_style'):
+            self.setStyleSheet(self._original_style)
+        else:
+            self.setStyleSheet(self._bubble_style())
+
+    def handle_link(self, url):
+        QDesktopServices.openUrl(QUrl(url))
 
     def _bubble_style(self):
         if self.sender == "user":
@@ -838,8 +990,15 @@ class StreamingMessageBubble(QFrame):
         elif self.sender == "system":
             color = "#555555"
         else:
-            color = "#444444"
-        return f"QFrame {{ background-color: {color}; border-radius: 12px; }}"
+            color = "#383838"
+
+        return f"""
+            QFrame {{ 
+                background-color: {color}; 
+                border-radius: 12px; 
+                border: 1px solid rgba(255,255,255,0.1);
+            }}
+        """
 
     def start_streaming(self):
         self.typing_indicator.setVisible(True)
@@ -956,7 +1115,7 @@ class ImageViewerDialog(QDialog):
 
 
 class ClickableVideoWidget(QVideoWidget):
-    """Custom VideoWidget to handle mouse clicks for Play/Pause"""
+
     clicked = pyqtSignal()
 
     def mousePressEvent(self, event):
@@ -1134,7 +1293,7 @@ class VideoPlayerDialog(QDialog):
         self.duration = 0
 
     def keyPressEvent(self, event):
-        """Keyboard Shortcuts"""
+
         if event.key() == Qt.Key.Key_Space:
             self.toggle_playback()
         elif event.key() == Qt.Key.Key_Right:
@@ -1353,94 +1512,12 @@ class AIChatApp(QMainWindow):
         self.model_type_combo.addItems(["Text Models", "Image Models"])
         self.model_type_combo.currentTextChanged.connect(self.on_model_type_changed)
         self.model_type_combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.model_type_combo.setStyleSheet("""
-            QComboBox {
-                background-color: #404040;
-                color: #ffffff;
-                border: 1px solid #555;
-                border-radius: 6px;
-                padding: 6px 15px;
-                min-width: 120px;
-                font-size: 13px;
-            }
-            QComboBox:hover {
-                background-color: #4a4a4a;
-                border: 1px solid #32CD32;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 6px solid #aaaaaa;
-                margin-right: 8px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #353535;
-                color: white;
-                border: 1px solid #32CD32;
-                outline: none;
-            }
-            QComboBox QAbstractItemView::item {
-                padding: 5px;
-                min-height: 25px;
-                outline: none;
-            }
-            QComboBox QAbstractItemView::item:selected,
-            QComboBox QAbstractItemView::item:focus {
-                background-color: #32CD32;
-                color: white;
-            }
-        """)
+        self.model_type_combo.setStyleSheet(self.header_combo_style())
 
         self.model_combo = QComboBox()
         self.model_combo.addItems(TEXT_MODELS)
         self.model_combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.model_combo.setStyleSheet("""
-                    QComboBox {
-                        background-color: #404040;
-                        color: #ffffff;
-                        border: 1px solid #555;
-                        border-radius: 6px;
-                        padding: 6px 15px;
-                        min-width: 120px;
-                        font-size: 13px;
-                    }
-                    QComboBox:hover {
-                        background-color: #4a4a4a;
-                        border: 1px solid #32CD32;
-                    }
-                    QComboBox::drop-down {
-                        border: none;
-                        width: 20px;
-                    }
-                    QComboBox::down-arrow {
-                        image: none;
-                        border-left: 5px solid transparent;
-                        border-right: 5px solid transparent;
-                        border-top: 6px solid #aaaaaa;
-                        margin-right: 8px;
-                    }
-                    QComboBox QAbstractItemView {
-                        background-color: #353535;
-                        color: white;
-                        border: 1px solid #32CD32;
-                        outline: none;
-                    }
-                    QComboBox QAbstractItemView::item {
-                        padding: 5px;
-                        min-height: 25px;
-                        outline: none;
-                    }
-                    QComboBox QAbstractItemView::item:selected,
-                    QComboBox QAbstractItemView::item:focus {
-                        background-color: #32CD32;
-                        color: white;
-                    }
-                """)
+        self.model_combo.setStyleSheet(self.header_combo_style())
 
         self.prompt_btn = QPushButton("⚙️ Prompt")
         self.prompt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1539,31 +1616,56 @@ class AIChatApp(QMainWindow):
             first_chat_id = list(self.all_chats.keys())[0]
             self.load_chat_by_id(first_chat_id)
 
-        MDL2_ICONS = {
-            'attach': '\uE723',
-            'folder': '\uE8B7',
-            'settings': '\uE713',
-            'new': '\uE710',
-            'search': '\uE721',
-            'file': '\uE8A5',
-            'image': '\uE91B',
-            'video': '\uE714',
-            'delete': '\uE74D',
-        }
-
         self.attach_btn.setFont(QFont("Segoe MDL2 Assets", 16))
         self.attach_btn.setText(MDL2_ICONS['attach'])
-
         self.settings_btn.setFont(QFont("Segoe MDL2 Assets", 13))
         self.settings_btn.setText(f"{MDL2_ICONS['settings']} Settings")
-
         self.prompt_btn.setFont(QFont("Segoe MDL2 Assets", 13))
-        self.prompt_btn.setText(f"{MDL2_ICONS['settings']} Settings")
+        self.prompt_btn.setText(f"{MDL2_ICONS['settings']} Prompt")
 
-        #self.workspace_btn.setFont(QFont("Segoe MDL2 Assets", 13))
-        #self.workspace_btn.setText(f"{MDL2_ICONS['folder']} {WORKSPACE_FOLDER}")
-
-
+    def header_combo_style(self):
+        return """
+            QComboBox {
+                background-color: #404040;
+                color: #ffffff;
+                border: 1px solid #555;
+                border-radius: 6px;
+                padding: 6px 15px;
+                min-width: 120px;
+                font-size: 13px;
+            }
+            QComboBox:hover {
+                background-color: #4a4a4a;
+                border: 1px solid #32CD32;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 6px solid #aaaaaa;
+                margin-right: 8px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #353535;
+                color: white;
+                border: 1px solid #32CD32;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 5px;
+                min-height: 25px;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item:selected,
+            QComboBox QAbstractItemView::item:focus {
+                background-color: #32CD32;
+                color: white;
+            }
+        """
 
     def open_settings(self):
         dialog = SettingsDialog(self)
@@ -1669,60 +1771,15 @@ class AIChatApp(QMainWindow):
 
     def send_file_in_chunks_silent(self, content, filename):
         chunk_size = 30000
-
         if len(content) > 1000000:
             print(f"Warning: File {filename} too large ({len(content)} chars), truncating to 1MB")
             content = content[:1000000]
 
         chunks = [content[i:i + chunk_size] for i in range(0, len(content), chunk_size)]
-
         for idx, chunk in enumerate(chunks, 1):
             chunk_content = f"[ATTACHED FILE: {filename} - Part {idx}/{len(chunks)}]\n{chunk}\n[END FILE]"
-
             message_payload = {"role": "user", "content": chunk_content}
             self.all_chats[self.current_chat_id]["messages"].append(message_payload)
-
-    def split_file_to_chunks(self, filepath, chunk_size=100000):
-        try:
-            content = FileConverter.convert(filepath)
-            if content.startswith("[Error"):
-                return None
-
-            chunks = [content[i:i + chunk_size] for i in range(0, len(content), chunk_size)]
-            base_name = os.path.splitext(os.path.basename(filepath))[0]
-
-            chunk_files = []
-            for idx, chunk in enumerate(chunks, 1):
-                chunk_filename = f"{base_name}_chunk{idx}.txt"
-                FileManager.write_file(chunk_filename, chunk)
-                chunk_files.append(chunk_filename)
-
-            return chunk_files
-        except Exception as e:
-            return None
-
-    def send_file_in_chunks(self, filepath, content, filename):
-        chunk_size = 30000
-        chunks = [content[i:i + chunk_size] for i in range(0, len(content), chunk_size)]
-
-        if not self.current_chat_id:
-            self.create_new_chat()
-
-        self.update_chat_title_if_needed(f"File: {filename}")
-
-        for idx, chunk in enumerate(chunks, 1):
-            chunk_content = f"[ATTACHED FILE: {filename}]\n{chunk}\n[END FILE]"
-
-            message_payload = {"role": "user", "content": chunk_content}
-            self.all_chats[self.current_chat_id]["messages"].append(message_payload)
-
-        display_text = f"📄 [{filename}]"
-        self.add_message_block("user", display_text)
-
-        self.save_current_chat()
-
-        QTimer.singleShot(100, lambda: self.chat_area.verticalScrollBar().setValue(
-            self.chat_area.verticalScrollBar().maximum()))
 
     def process_clipboard_image(self, qimage):
         try:
@@ -1786,29 +1843,13 @@ class AIChatApp(QMainWindow):
                 icon_label.setFixedSize(50, 50)
                 icon_label.setScaledContents(True)
                 icon_label.setStyleSheet("border: 1px solid #555; border-radius: 3px;")
-
                 if "thumbnail" in attachment and attachment["thumbnail"]:
-                    pixmap = attachment["thumbnail"]
-                    overlay = QPixmap(pixmap.size())
-                    overlay.fill(Qt.GlobalColor.transparent)
-                    painter = QPainter(overlay)
-                    painter.drawPixmap(0, 0, pixmap)
-                    painter.setBrush(QColor(0, 0, 0, 128))
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.drawRect(overlay.rect())
-                    painter.setPen(QColor(255, 255, 255))
-                    font = painter.font()
-                    font.setPointSize(24)
-                    painter.setFont(font)
-                    painter.drawText(overlay.rect(), Qt.AlignmentFlag.AlignCenter, "▶")
-                    painter.end()
-                    icon_label.setPixmap(overlay.scaled(50, 50, Qt.AspectRatioMode.KeepAspectRatio,
-                                                        Qt.TransformationMode.SmoothTransformation))
+                    icon_label.setPixmap(attachment["thumbnail"].scaled(50, 50, Qt.AspectRatioMode.KeepAspectRatio,
+                                                                        Qt.TransformationMode.SmoothTransformation))
                 else:
                     icon_label.setText("🎥")
                     icon_label.setStyleSheet("font-size: 30px; border: 1px solid #555; border-radius: 3px;")
                     icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
                 preview_layout.addWidget(icon_label)
             else:
                 file_icon = QLabel("📄")
@@ -1917,7 +1958,6 @@ class AIChatApp(QMainWindow):
                 child.widget().deleteLater()
 
         messages = self.all_chats[chat_id]["messages"]
-
         skip_counter = 0
 
         for idx, msg in enumerate(messages):
@@ -1955,15 +1995,10 @@ class AIChatApp(QMainWindow):
                                         if b64: media_data_list.append({"type": "image", "data": b64})
                             elif part.get("type") == "video_url":
                                 url = part.get("video_url", {}).get("url", "")
-
                                 if not url.startswith("data:") and not url.startswith("http"):
                                     full_path = os.path.join(WORKSPACE_FOLDER, url)
                                     if os.path.exists(full_path):
                                         media_data_list.append({"type": "video", "path": full_path})
-                                        fname = os.path.basename(full_path)
-                                        if f"🎥 [Video: {fname}]" not in str_content_for_check:
-                                            pass
-                                            #str_content_for_check += f"\n🎥 [Video: {fname}]"
 
                     if idx + 1 < len(messages):
                         next_msg = messages[idx + 1]
@@ -2040,6 +2075,7 @@ class AIChatApp(QMainWindow):
             if item.data(Qt.ItemDataRole.UserRole) == chat_id:
                 item.setSelected(True)
                 break
+
         QTimer.singleShot(100, lambda: self.chat_area.verticalScrollBar().setValue(
             self.chat_area.verticalScrollBar().maximum()))
 
@@ -2077,15 +2113,13 @@ class AIChatApp(QMainWindow):
         self.chat_layout.addSpacing(6)
 
     def reconstruct_chunked_file(self, filename, messages):
-        """Helper to stitch together split file chunks from history"""
+
         full_content = []
         found_parts = {}
         total_parts = 0
-
         escaped_name = re.escape(filename)
         header_pattern = re.compile(r'\[ATTACHED FILE: ' + escaped_name + r' - Part (\d+)/(\d+)\]\n(.*?)\n\[END FILE\]',
                                     re.DOTALL)
-
         for msg in messages:
             content = msg.get("content", "")
             if isinstance(content, list):
@@ -2094,42 +2128,34 @@ class AIChatApp(QMainWindow):
                     if part.get("type") == "text":
                         text_content += part.get("text", "")
                 content = text_content
-
             match = header_pattern.search(str(content))
             if match:
                 part_idx = int(match.group(1))
                 total_parts = int(match.group(2))
                 file_content = match.group(3)
                 found_parts[part_idx] = file_content
-
         if found_parts:
             for i in range(1, total_parts + 1):
                 if i in found_parts:
                     full_content.append(found_parts[i])
             return "".join(full_content)
-
         return None
 
     def find_file_content_in_history(self, filename):
         if not self.current_chat_id or self.current_chat_id not in self.all_chats:
             return None
-
         messages = self.all_chats[self.current_chat_id]["messages"]
-
         chunked_content = self.reconstruct_chunked_file(filename, messages)
         if chunked_content:
             return chunked_content
-
         for msg in reversed(messages):
             content = msg.get("content", "")
-
             if isinstance(content, list):
                 text_content = ""
                 for part in content:
                     if part.get("type") == "text":
                         text_content += part.get("text", "")
                 content = text_content
-
             pattern = r'\[ATTACHED FILE: ' + re.escape(filename) + r'\]\n(.*?)\n\[END FILE\]'
             match = re.search(pattern, content, re.DOTALL)
             if match:
@@ -2143,7 +2169,6 @@ class AIChatApp(QMainWindow):
 
     def update_chat_title_if_needed(self, user_text):
         if not self.current_chat_id: return
-
         chat_data = self.all_chats[self.current_chat_id]
         if chat_data["name"] == "New Chat":
             new_name = user_text[:30] + "..." if len(user_text) > 30 else user_text
@@ -2152,23 +2177,18 @@ class AIChatApp(QMainWindow):
 
     def show_context_menu(self, pos):
         item = self.chat_list_widget.itemAt(pos)
-        if not item:
-            return
-
+        if not item: return
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu { background-color: #333; color: white; border: 1px solid #555; }
             QMenu::item { padding: 6px 20px; }
             QMenu::item:selected { background-color: #32CD32; }
         """)
-
         rename_action = menu.addAction("✏️ Rename")
         export_json_action = menu.addAction("💾 Export JSON")
         export_md_action = menu.addAction("📝 Export Markdown")
         delete_action = menu.addAction("🗑️ Delete")
-
         action = menu.exec(self.chat_list_widget.mapToGlobal(pos))
-
         if action == rename_action:
             self.rename_chat_item(item)
         elif action == delete_action:
@@ -2182,7 +2202,6 @@ class AIChatApp(QMainWindow):
         chat_id = item.data(Qt.ItemDataRole.UserRole)
         chat_data = self.all_chats.get(chat_id)
         if not chat_data: return
-
         filename = f"chat_export_{int(time.time())}"
         if format_type == "json":
             filename += ".json"
@@ -2205,19 +2224,15 @@ class AIChatApp(QMainWindow):
     def rename_chat_item(self, item):
         chat_id = item.data(Qt.ItemDataRole.UserRole)
         if not chat_id: return
-
         current_name = self.all_chats[chat_id]["name"]
-
         dialog = QInputDialog(self)
         dialog.setStyleSheet(DIALOG_STYLESHEET)
         dialog.setWindowTitle("Rename Chat")
         dialog.setLabelText("New Name:")
         dialog.setTextValue(current_name)
         dialog.setOkButtonText("Save")
-
         ok = dialog.exec()
         new_name = dialog.textValue()
-
         if ok and new_name.strip():
             self.all_chats[chat_id]["name"] = new_name.strip()
             ChatStorage.save_chats(self.all_chats)
@@ -2226,33 +2241,27 @@ class AIChatApp(QMainWindow):
     def delete_chat_item(self, item):
         chat_id = item.data(Qt.ItemDataRole.UserRole)
         if not chat_id: return
-
         msg_box = QMessageBox(self)
         msg_box.setStyleSheet(DIALOG_STYLESHEET)
         msg_box.setWindowTitle("Delete Chat")
         msg_box.setText("Are you sure you want to delete this chat permanently?")
         msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         msg_box.setDefaultButton(QMessageBox.StandardButton.No)
-
         confirm = msg_box.exec()
-
         if confirm == QMessageBox.StandardButton.Yes:
             if chat_id in self.all_chats:
                 del self.all_chats[chat_id]
                 ChatStorage.save_chats(self.all_chats)
-
             if self.current_chat_id == chat_id:
                 self.current_chat_id = None
                 while self.chat_layout.count():
                     child = self.chat_layout.takeAt(0)
                     if child.widget(): child.widget().deleteLater()
-
                 if self.all_chats:
                     next_id = list(self.all_chats.keys())[0]
                     self.load_chat_by_id(next_id)
                 else:
                     self.create_new_chat()
-
             self.refresh_sidebar()
 
     def open_workspace_folder(self):
@@ -2264,7 +2273,6 @@ class AIChatApp(QMainWindow):
         messages = self.all_chats[self.current_chat_id]["messages"]
         system_msg = next((m for m in messages if m["role"] == "system"), None)
         current_prompt = system_msg["content"] if system_msg else DEFAULT_SYSTEM_PROMPT
-
         dialog = PromptEditorDialog(current_prompt, self)
         if dialog.exec():
             new_prompt = dialog.get_prompt()
@@ -2293,6 +2301,8 @@ class AIChatApp(QMainWindow):
         else:
             bubble = StreamingMessageBubble(sender, text or "")
 
+        bubble.edit_confirmed.connect(lambda new_text: self.handle_bubble_edit(bubble, new_text))
+        bubble.regenerate_requested.connect(lambda: self.handle_bubble_regenerate(bubble))
         bubble.label.clicked.connect(lambda: self.check_file_click(bubble.full_text))
 
         container = QWidget()
@@ -2325,6 +2335,52 @@ class AIChatApp(QMainWindow):
 
         v_layout.addWidget(bubble_container)
 
+        if sender != "system":
+            action_row = QWidget()
+            action_layout = QHBoxLayout(action_row)
+            action_layout.setContentsMargins(5, 0, 5, 0)
+            action_layout.setSpacing(10)
+
+            btn_style = """
+                QPushButton {
+                    background-color: transparent;
+                    color: #888;
+                    border: none;
+                    font-family: 'Segoe MDL2 Assets';
+                    font-size: 14px;
+                }
+                QPushButton:hover { color: white; }
+            """
+
+            copy_btn = QPushButton("\uE8C8")
+            copy_btn.setToolTip("Copy to Clipboard")
+            copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            copy_btn.setStyleSheet(btn_style)
+            copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(bubble.full_text))
+
+            if sender == "user":
+                edit_btn = QPushButton("\uE70F")
+                edit_btn.setToolTip("Edit Message")
+                edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                edit_btn.setStyleSheet(btn_style)
+                edit_btn.clicked.connect(bubble.start_edit_mode)
+
+                action_layout.addStretch()
+                action_layout.addWidget(edit_btn)
+                action_layout.addWidget(copy_btn)
+            else:
+                regen_btn = QPushButton("\uE72C")
+                regen_btn.setToolTip("Regenerate Response")
+                regen_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                regen_btn.setStyleSheet(btn_style)
+                regen_btn.clicked.connect(lambda: self.handle_bubble_regenerate(bubble))
+
+                action_layout.addWidget(copy_btn)
+                action_layout.addWidget(regen_btn)
+                action_layout.addStretch()
+
+            v_layout.addWidget(action_row)
+
         self.chat_layout.addWidget(container)
         self.chat_layout.addSpacing(6)
 
@@ -2333,31 +2389,77 @@ class AIChatApp(QMainWindow):
 
         return bubble
 
-    def find_file_content_in_history(self, filename):
-        if not self.current_chat_id or self.current_chat_id not in self.all_chats:
-            return None
+    def find_message_index_by_bubble(self, bubble):
+        if not self.current_chat_id: return -1
+        messages = self.all_chats[self.current_chat_id]["messages"]
+
+        target_text = bubble.full_text
+        target_role = bubble.sender
+
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if msg["role"] == target_role:
+                content = msg["content"]
+                text_content = ""
+                if isinstance(content, list):
+                    for part in content:
+                        if part.get("type") == "text":
+                            text_content += part.get("text", "")
+                else:
+                    text_content = str(content)
+
+                if text_content.strip() == target_text.strip():
+                    return i
+
+                if target_text in text_content or text_content in target_text:
+                    return i
+        return -1
+
+    def handle_bubble_edit(self, bubble, new_text):
+        idx = self.find_message_index_by_bubble(bubble)
+        if idx == -1: return
 
         messages = self.all_chats[self.current_chat_id]["messages"]
-        for msg in reversed(messages):
-            content = msg.get("content", "")
+        msg = messages[idx]
 
-            if isinstance(content, list):
-                text_content = ""
-                for part in content:
-                    if part.get("type") == "text":
-                        text_content += part.get("text", "")
-                content = text_content
+        if isinstance(msg["content"], list):
+            found_text = False
+            for part in msg["content"]:
+                if part.get("type") == "text":
+                    part["text"] = new_text
+                    found_text = True
+                    break
+            if not found_text:
+                msg["content"].insert(0, {"type": "text", "text": new_text})
+        else:
+            msg["content"] = new_text
 
-            pattern = r'\[ATTACHED FILE: ' + re.escape(filename) + r'\]\n(.*?)\n\[END FILE\]'
-            match = re.search(pattern, content, re.DOTALL)
-            if match:
-                return match.group(1)
-        return None
+        if msg["role"] == "user":
+            self.all_chats[self.current_chat_id]["messages"] = messages[:idx + 1]
+            self.save_current_chat()
+
+            self.load_chat_by_id(self.current_chat_id)
+
+            self.trigger_assistant_response()
+        else:
+            self.save_current_chat()
+
+    def handle_bubble_regenerate(self, bubble):
+        idx = self.find_message_index_by_bubble(bubble)
+        if idx == -1: return
+
+        messages = self.all_chats[self.current_chat_id]["messages"]
+
+        self.all_chats[self.current_chat_id]["messages"] = messages[:idx]
+        self.save_current_chat()
+
+        self.load_chat_by_id(self.current_chat_id)
+
+        self.trigger_assistant_response()
 
     def check_file_click(self, text):
         matches = re.findall(r'📄 \[(.*?)\]', text)
         if not matches: return
-
         if len(matches) == 1:
             fname = matches[0]
             content = self.find_file_content_in_history(fname)
@@ -2410,7 +2512,6 @@ class AIChatApp(QMainWindow):
 
         if self.current_streaming_bubble:
             self.current_streaming_bubble.stop_streaming()
-
             if not self.current_streaming_bubble.full_text.strip():
                 try:
                     bubble_parent = self.current_streaming_bubble.parent()
@@ -2421,7 +2522,6 @@ class AIChatApp(QMainWindow):
                             self.chat_layout.removeWidget(main_container)
                 except Exception as e:
                     print(f"Error removing empty bubble: {e}")
-
             self.current_streaming_bubble = None
 
     def send_message(self):
@@ -2440,7 +2540,6 @@ class AIChatApp(QMainWindow):
         if self.current_attachments:
             chunked_files = []
             regular_attachments = []
-
             for attachment in self.current_attachments:
                 if attachment.get("needs_chunking"):
                     chunked_files.append(attachment)
@@ -2457,12 +2556,10 @@ class AIChatApp(QMainWindow):
                 if attachment.get("is_image"):
                     if display_text:
                         display_text += f"\n"
-
                     full_path = os.path.join(WORKSPACE_FOLDER, attachment["content"])
                     b64 = FileConverter.encode_media_base64(full_path)
                     if b64:
                         attached_media_data_for_display.append({"type": "image", "data": b64})
-
                     content_parts.append({
                         "type": "image_url",
                         "image_url": {
@@ -2472,23 +2569,19 @@ class AIChatApp(QMainWindow):
                 elif attachment.get("is_video"):
                     if display_text:
                         display_text += f"\n"
-
                     full_path = os.path.join(WORKSPACE_FOLDER, attachment["content"])
                     attached_media_data_for_display.append({"type": "video", "path": full_path})
-
                     content_parts.append({
                         "type": "video_url",
                         "video_url": {
                             "url": attachment["content"]
                         }
                     })
-
                 else:
                     if display_text:
                         display_text += f"\n📄 [{attachment['path']}]"
                     else:
                         display_text = f"📄 [{attachment['path']}]"
-
                     file_text_parts.append(
                         f"\n\n[ATTACHED FILE: {attachment['path']}]\n{attachment['content']}\n[END FILE]")
 
@@ -2505,7 +2598,6 @@ class AIChatApp(QMainWindow):
                             content_parts.insert(0, {"type": "text", "text": "".join(file_text_parts)})
                         else:
                             content_parts[0]["text"] += "".join(file_text_parts)
-
                     message_payload = {
                         "role": "user",
                         "content": content_parts
@@ -2513,7 +2605,6 @@ class AIChatApp(QMainWindow):
                 else:
                     full_prompt = (user_text if user_text else "") + "".join(file_text_parts)
                     message_payload = {"role": "user", "content": full_prompt}
-
                 msgs = self.all_chats[self.current_chat_id]["messages"]
                 msgs.append(message_payload)
             elif user_text:
@@ -2531,9 +2622,7 @@ class AIChatApp(QMainWindow):
             msgs.append(message_payload)
 
         self.input_field.clear()
-
         self.add_message_block("user", display_text, media_data_list=attached_media_data_for_display)
-
         self.save_current_chat()
         self.trigger_assistant_response()
 
@@ -2547,7 +2636,6 @@ class AIChatApp(QMainWindow):
 
         model = self.model_combo.currentText()
         messages_history = self.all_chats[self.current_chat_id]["messages"]
-
         is_image = self.is_image_model()
 
         if not is_image:
@@ -2561,9 +2649,7 @@ class AIChatApp(QMainWindow):
         self.thread.start()
 
     def handle_image_generated(self, image_bytes, saved_path):
-
         base64_str = base64.b64encode(image_bytes).decode('utf-8')
-
         image_message = {
             "role": "assistant",
             "content": [
@@ -2580,29 +2666,23 @@ class AIChatApp(QMainWindow):
             ]
         }
         self.all_chats[self.current_chat_id]["messages"].append(image_message)
-
         container = QWidget()
         h_layout = QHBoxLayout(container)
         h_layout.setContentsMargins(0, 0, 0, 0)
         h_layout.setSpacing(0)
-
         image_widget = self.create_image_preview({"type": "image", "data": base64_str}, "assistant")
         h_layout.addWidget(image_widget)
         h_layout.addStretch()
-
         self.chat_layout.addWidget(container)
         self.chat_layout.addSpacing(6)
-
         QTimer.singleShot(10, lambda: self.chat_area.verticalScrollBar().setValue(
             self.chat_area.verticalScrollBar().maximum()))
-
         self.save_current_chat()
 
     def create_image_preview(self, media_data, sender):
         try:
             pixmap = QPixmap()
             is_video = False
-
             if media_data.get("type") == "image":
                 image_bytes = base64.b64decode(media_data["data"])
                 pixmap.loadFromData(image_bytes)
@@ -2615,28 +2695,22 @@ class AIChatApp(QMainWindow):
                 else:
                     pixmap = QPixmap(250, 150)
                     pixmap.fill(QColor("#333"))
-
             if pixmap.isNull():
                 error_label = QLabel("⚠️ Media load failed")
                 error_label.setStyleSheet("color: #ff6b6b; padding: 10px;")
                 return error_label
-
             image_label = ClickableImageLabel()
             image_label.setCursor(Qt.CursorShape.PointingHandCursor)
-
             scaled_pixmap = pixmap.scaled(250, 250, Qt.AspectRatioMode.KeepAspectRatio,
                                           Qt.TransformationMode.SmoothTransformation)
-
             if is_video:
                 overlay = QPixmap(scaled_pixmap.size())
                 overlay.fill(Qt.GlobalColor.transparent)
                 painter = QPainter(overlay)
                 painter.drawPixmap(0, 0, scaled_pixmap)
-
                 painter.setBrush(QColor(0, 0, 0, 100))
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.drawRect(overlay.rect())
-
                 painter.setBrush(QColor(255, 255, 255, 200))
                 center = overlay.rect().center()
                 size = 30
@@ -2650,14 +2724,11 @@ class AIChatApp(QMainWindow):
                 image_label.setPixmap(overlay)
             else:
                 image_label.setPixmap(scaled_pixmap)
-
             image_label.setStyleSheet("border-radius: 8px; background-color: #333; border: 1px solid #444;")
-
             if is_video:
                 image_label.clicked.connect(lambda: self.open_video_player(media_data["path"]))
             else:
                 image_label.clicked.connect(lambda: self.open_image_viewer(pixmap))
-
             return image_label
         except Exception as e:
             print(f"Error displaying media: {e}")
@@ -2669,7 +2740,6 @@ class AIChatApp(QMainWindow):
         if self.current_streaming_bubble:
             sb = self.chat_area.verticalScrollBar()
             was_at_bottom = sb.value() >= (sb.maximum() - 30)
-
             self.current_streaming_bubble.add_text_chunk(chunk)
             if was_at_bottom:
                 sb.setValue(sb.maximum())
@@ -2681,46 +2751,36 @@ class AIChatApp(QMainWindow):
             QPushButton { background-color: #32CD32; color: white; padding: 10px 20px; font-weight: bold; border-radius: 5px; }
             QPushButton:hover { background-color: #2ECC71; }
         """)
-
         if not self.is_image_model():
             self.all_chats[self.current_chat_id]["messages"].append({
                 "role": "assistant",
                 "content": full_response
             })
-
             if self.current_streaming_bubble:
                 self.current_streaming_bubble.set_complete_text(full_response)
                 self.current_streaming_bubble.stop_streaming()
                 self.current_streaming_bubble = None
-
         self.save_current_chat()
         self.execute_ai_file_commands(full_response if not self.is_image_model() else "")
 
     def execute_ai_file_commands(self, text):
         create_pattern = re.compile(r':::create file="(.*?)"(.*?):::(.*?):::end_create:::', re.DOTALL)
         creates = create_pattern.findall(text)
-
         for filename, extra_args, content in creates:
             filename = filename.strip()
             if content.startswith('\n'): content = content[1:]
             result_msg = FileManager.write_file(filename, content)
-
             sys_msg = f"⚙️ {result_msg}"
-
             self.all_chats[self.current_chat_id]["messages"].append({"role": "system", "content": sys_msg})
-
             self.add_message_block("system", sys_msg)
 
         delete_pattern = re.compile(r':::delete file="(.*?)"(.*?):::')
         deletes = delete_pattern.findall(text)
-
         for filename, extra_args in deletes:
             filename = filename.strip()
             result_msg = FileManager.delete_file(filename)
-
             sys_msg = f"🗑️ {result_msg}"
             self.all_chats[self.current_chat_id]["messages"].append({"role": "system", "content": sys_msg})
-
             self.add_message_block("system", sys_msg)
 
         if creates or deletes:
@@ -2733,7 +2793,6 @@ class AIChatApp(QMainWindow):
             QPushButton { background-color: #32CD32; color: white; padding: 10px 20px; font-weight: bold; border-radius: 5px; }
             QPushButton:hover { background-color: #2ECC71; }
         """)
-
         if self.current_streaming_bubble:
             self.current_streaming_bubble.stop_streaming()
             self.current_streaming_bubble.set_complete_text(f"Error: {error}")
