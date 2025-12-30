@@ -168,16 +168,18 @@ class ThemeManager:
     def get_scrollbar_stylesheet(cls):
         c = cls.PALETTES[cls.CURRENT_THEME]
         return f"""
-            QScrollBar:vertical {{ border: none; background: {c['scroll_bg']}; width: 10px; margin: 0px; }}
-            QScrollBar::handle:vertical {{ background: {c['scroll_handle']}; min-height: 20px; border-radius: 5px; }}
-            QScrollBar::handle:vertical:hover {{ background: {c['border']}; }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
-            QScrollBar:horizontal {{ border: none; background: {c['scroll_bg']}; height: 10px; margin: 0px; }}
-            QScrollBar::handle:horizontal {{ background: {c['scroll_handle']}; min-width: 20px; border-radius: 5px; }}
-            QScrollBar::handle:horizontal:hover {{ background: {c['border']}; }}
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
-        """
+                QScrollBar:vertical {{ border: none; background: {c['scroll_bg']}; width: 10px; margin: 0px; }}
+                QScrollBar::handle:vertical {{ background: {c['scroll_handle']}; min-height: 20px; border-radius: 5px; }}
+                QScrollBar::handle:vertical:hover {{ background: {c['border']}; }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
+
+                QScrollBar:horizontal {{ border: none; background: {c['scroll_bg']}; height: 10px; margin: 0px; }}
+                QScrollBar::handle:horizontal {{ background: {c['scroll_handle']}; min-width: 20px; border-radius: 5px; }}
+                QScrollBar::handle:horizontal:hover {{ background: {c['border']}; }}
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
+                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: none; }}
+            """
 
 
 class SettingsManager:
@@ -316,32 +318,109 @@ class FileConverter:
     def extract_audio_text_from_video(filepath):
         video_clip = None
         temp_audio_path = None
+
         try:
+            print(f"Loading video: {filepath}")
             video_clip = VideoFileClip(filepath)
-            if not video_clip.audio: return "[Video has no audio track]"
+
+            if not video_clip.audio:
+                return "[Video has no audio track]"
+
             duration = getattr(video_clip, 'duration', None)
-            if duration and duration > 0:
-                max_dur = min(duration, 90.0)
-                try:
-                    audio_subclip = video_clip.subclip(0, max_dur).audio
-                except:
-                    audio_subclip = video_clip.audio.with_end(max_dur)
-            else:
-                audio_subclip = video_clip.audio
+            if not duration or duration <= 0:
+                return "[Could not determine video duration]"
+
+            max_duration = min(duration, 1200.0)
+            chunk_size = 30.0
+
+            audio_clip = video_clip.audio
+            if max_duration < duration:
+                audio_clip = audio_clip.subclipped(0, max_duration)
+
             fd, temp_audio_path = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
-            audio_subclip.write_audiofile(temp_audio_path, codec="pcm_s16le", fps=16000, ffmpeg_params=["-ac", "1"],
-                                          verbose=False, logger=None)
+
+            audio_clip.write_audiofile(
+                temp_audio_path,
+                codec="pcm_s16le",
+                fps=16000,
+                nbytes=2,
+                ffmpeg_params=["-ac", "1"]
+            )
+
             recognizer = sr.Recognizer()
+            recognizer.energy_threshold = 300
+            recognizer.dynamic_energy_threshold = True
+
+            full_transcript = []
+
+            languages_to_try = ["ru-RU", "en-US"]
+
             with sr.AudioFile(temp_audio_path) as source:
-                audio_data = recognizer.record(source)
-                return recognizer.recognize_google(audio_data)
-        except sr.UnknownValueError:
-            return "[Audio was present but unintelligible]"
+                audio_length = source.DURATION
+                num_chunks = int(audio_length / chunk_size) + 1
+
+                print(f"Recording full audio for processing...")
+                full_audio = recognizer.record(source)
+
+                sample_rate = source.SAMPLE_RATE
+                sample_width = source.SAMPLE_WIDTH
+
+                for i in range(num_chunks):
+                    try:
+                        start = i * chunk_size
+                        duration_chunk = min(chunk_size, audio_length - start)
+
+                        if duration_chunk <= 0:
+                            break
+
+                        start_sample = int(start * sample_rate) * sample_width
+                        end_sample = int((start + duration_chunk) * sample_rate) * sample_width
+                        chunk_data = full_audio.frame_data[start_sample:end_sample]
+                        audio_chunk = sr.AudioData(chunk_data, sample_rate, sample_width)
+
+                        text = None
+                        detected_lang = None
+
+                        for lang in languages_to_try:
+                            try:
+                                result = recognizer.recognize_google(
+                                    audio_chunk,
+                                    language=lang,
+                                    show_all=False
+                                )
+                                if result:
+                                    text = result
+                                    detected_lang = lang
+                                    break
+                            except (sr.UnknownValueError, sr.RequestError):
+                                continue
+
+                        if text and text.strip():
+                            full_transcript.append(text)
+                            print(f"  ✓ Chunk {i + 1} ({detected_lang}): {text[:30]}...")
+                        else:
+                            print(f"  - Chunk {i + 1}: No speech detected")
+
+                    except Exception as e:
+                        print(f"  ✗ Chunk {i + 1} error: {e}")
+                        continue
+
+            if full_transcript:
+                return " ".join(full_transcript)
+            else:
+                return "[Audio was present but no speech could be detected]"
+
         except Exception as e:
+            print(f"Error extracting audio: {e}")
             return f"[Error extracting audio: {str(e)}]"
+
         finally:
-            if video_clip: video_clip.close()
+            if video_clip:
+                try:
+                    video_clip.close()
+                except:
+                    pass
             if temp_audio_path and os.path.exists(temp_audio_path):
                 try:
                     os.remove(temp_audio_path)
@@ -467,6 +546,8 @@ class AIResponseThread(QThread):
     response_complete = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
     image_generated = pyqtSignal(bytes, str)
+    status_update = pyqtSignal(str)
+    transcript_ready = pyqtSignal()
 
     def __init__(self, model, messages, is_image_model=False):
         super().__init__()
@@ -486,8 +567,13 @@ class AIResponseThread(QThread):
             self.generate_text()
 
     def generate_image(self):
+        """Fixed Image Generation with Debugging and New API support"""
         try:
+            self.status_update.emit("Generating image...")
             prompt = ""
+
+            print(f"[DEBUG] Starting image gen. Model: {self.model}")
+
             for msg in reversed(self.messages):
                 if msg["role"] == "user":
                     content = msg["content"]
@@ -499,25 +585,66 @@ class AIResponseThread(QThread):
                                 prompt = part.get("text", "")
                                 break
                     break
+
             if not prompt:
-                self.error_occurred.emit("No prompt found for image generation")
+                print("[DEBUG] ERROR: No user prompt found in history.")
+                self.error_occurred.emit("No prompt found in chat history.")
                 return
-            url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(prompt)}"
+
+            encoded_prompt = requests.utils.quote(prompt)
+            url = f"https://gen.pollinations.ai/image/{encoded_prompt}"
+
             headers = {"Authorization": f"Bearer {self.api_key}"}
-            params = {"model": self.model, "seed": random.randint(1, 10000), "width": 1024, "height": 1024,
-                      "private": "true", "safe": "false", "nologo": "true"}
+
+            params = {
+                "model": self.model,
+                "width": 1024,
+                "height": 1024,
+                "seed": random.randint(1, 1000000),
+                "enhance": "false",
+                "negative_prompt": "worst quality, blurry",
+                "private": "true",
+                "nologo": "true",
+                "safe": "false",
+                "quality": "medium"
+            }
+
+            print(f"[DEBUG] Requesting URL: {url}")
+            print(f"[DEBUG] Params: {params}")
+            print(f"[DEBUG] Headers (Auth check): {'Key Present' if self.api_key else 'Key MISSING'}")
+
             response = requests.get(url, headers=headers, params=params, timeout=250)
-            response.raise_for_status()
+
+            print(f"[DEBUG] Response Status: {response.status_code}")
+
+            if response.status_code != 200:
+                error_body = response.text[:500]
+                print(f"[DEBUG] API Error Body: {error_body}")
+                self.error_occurred.emit(f"API Error ({response.status_code}): {error_body}")
+                return
+
             if response.content:
+                print(f"[DEBUG] Success: Received {len(response.content)} bytes.")
                 saved_path = FileManager.save_media_from_bytes(response.content, ".png")
+
                 if saved_path:
+                    print(f"[DEBUG] Image saved to: {saved_path}")
                     self.image_generated.emit(response.content, saved_path)
                     self.response_complete.emit(f"🖼️ Generated image using {self.model}")
                 else:
-                    self.error_occurred.emit("Failed to save generated image")
+                    print("[DEBUG] ERROR: FileManager failed to save bytes.")
+                    self.error_occurred.emit("Failed to save generated image to disk.")
             else:
-                self.error_occurred.emit("No image data received")
+                print("[DEBUG] ERROR: Response content is empty.")
+                self.error_occurred.emit("No image data received from server.")
+
+        except requests.exceptions.Timeout:
+            print("[DEBUG] ERROR: Request timed out.")
+            self.error_occurred.emit("Image generation timed out. The server is likely busy.")
         except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"[DEBUG] Exception: {str(e)}")
             self.error_occurred.emit(f"Image generation failed: {str(e)}")
 
     def generate_text(self):
@@ -527,12 +654,18 @@ class AIResponseThread(QThread):
             if not self._is_running: return
             try:
                 full_response = ""
+
                 prepared_messages = self.prepare_messages_for_api(self.messages)
+
+                self.status_update.emit("Thinking...")
+
                 url = "https://gen.pollinations.ai/v1/chat/completions"
                 headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
                 payload = {"model": self.model, "messages": prepared_messages, "stream": True, "temperature": 1.0}
+
                 response = requests.post(url, headers=headers, json=payload, stream=True, timeout=250)
                 response.raise_for_status()
+
                 for line in response.iter_lines():
                     if not self._is_running: return
                     if line:
@@ -556,78 +689,100 @@ class AIResponseThread(QThread):
                 return
             except Exception as e:
                 error_str = str(e).lower()
-                retryable = any(x in error_str for x in
-                                ["443", "500", "502", "503", "504", "bad gateway", "service unavailable", "timeout",
-                                 "connection", "reset", "rate limit", "413", "429"])
+                retryable = any(
+                    x in error_str for x in ["443", "500", "502", "503", "504", "timeout", "connection", "rate limit"])
                 if attempt < max_retries and self._is_running and retryable:
-                    delay = base_delay * (2 ** attempt) + (0.1 * attempt)
-                    print(f"\n[Retry] {e} → Retrying in {delay:.1f}s...")
-                    time.sleep(delay)
+                    self.status_update.emit(f"Retrying connection ({attempt + 1})...")
+                    time.sleep(1 + attempt)
                     continue
                 else:
-                    final_error = f"Failed after {attempt} retries: {str(e)}"
-                    print("\n[Error]", final_error)
-                    self.error_occurred.emit(final_error)
+                    self.error_occurred.emit(str(e))
                     return
 
     def prepare_messages_for_api(self, messages):
+        updates_made = False
+
+        for msg in messages:
+            if isinstance(msg.get("content"), list):
+                video_path = None
+                for part in msg["content"]:
+                    if part.get("type") == "video_url":
+                        video_path = part["video_url"]["url"]
+                        break
+
+                if video_path and "transcript" not in msg:
+                    if not video_path.startswith("data:") and not video_path.startswith("http"):
+                        full_path = os.path.join(WORKSPACE_FOLDER, video_path)
+                        if os.path.exists(full_path):
+                            self.status_update.emit("Extracting video audio...")
+                            audio_text = FileConverter.extract_audio_text_from_video(full_path)
+                            msg["transcript"] = audio_text
+                            updates_made = True
+
+        if updates_made:
+            self.transcript_ready.emit()
+
         api_messages = []
         total_msgs = len(messages)
+
         for idx, msg in enumerate(messages):
             is_latest = (idx == total_msgs - 1)
-            new_msg = msg.copy()
-            if isinstance(new_msg.get("content"), list):
-                new_content = []
-                for part in new_msg["content"]:
-                    if part.get("type") == "image_url":
+            new_msg = {"role": msg["role"], "content": []}
+
+            if "transcript" in msg:
+                transcript_text = f"\n[Video Transcript: {msg['transcript']}]\n"
+                if isinstance(msg["content"], str):
+                    new_msg["content"] = msg["content"] + transcript_text
+                else:
+                    new_msg["content"].append({"type": "text", "text": transcript_text})
+
+            if isinstance(msg["content"], str):
+                if not new_msg["content"]:
+                    new_msg["content"] = msg["content"]
+                elif isinstance(new_msg["content"], list):
+                    new_msg["content"].append({"type": "text", "text": msg["content"]})
+
+            elif isinstance(msg["content"], list):
+                for part in msg["content"]:
+                    if part.get("type") == "video_url":
+                        if is_latest:
+                            url = part["video_url"]["url"]
+                            full_path = os.path.join(WORKSPACE_FOLDER, url)
+                            if os.path.exists(full_path):
+                                if os.path.getsize(full_path) < MAX_VIDEO_SIZE_BYTES:
+                                    b64 = FileConverter.encode_media_base64(full_path)
+                                    mime = FileConverter.get_mime_type(full_path)
+                                    new_msg["content"].append({
+                                        "type": "video_url",
+                                        "video_url": {"url": f"data:{mime};base64,{b64}"}
+                                    })
+                                else:
+                                    self.status_update.emit("Processing video frames...")
+                                    frames = FileConverter.extract_frames_for_api(full_path)
+                                    for f in frames:
+                                        new_msg["content"].append({
+                                            "type": "image_url",
+                                            "image_url": {"url": f"data:image/jpeg;base64,{f}"}
+                                        })
+
+                    elif part.get("type") == "image_url":
                         url = part["image_url"]["url"]
                         if not url.startswith("data:") and not url.startswith("http"):
                             full_path = os.path.join(WORKSPACE_FOLDER, url)
                             if os.path.exists(full_path):
                                 b64 = FileConverter.encode_media_base64(full_path)
+                                mime = FileConverter.get_mime_type(full_path)
                                 if b64:
-                                    part_copy = part.copy()
-                                    part_copy["image_url"] = {"url": f"data:image/png;base64,{b64}"}
-                                    new_content.append(part_copy)
+                                    new_msg["content"].append({
+                                        "type": "image_url",
+                                        "image_url": {"url": f"data:{mime};base64,{b64}"}
+                                    })
                                     continue
-                        new_content.append(part)
-                    elif part.get("type") == "video_url":
-                        url = part["video_url"]["url"]
-                        if not url.startswith("data:") and not url.startswith("http"):
-                            full_path = os.path.join(WORKSPACE_FOLDER, url)
-                            if os.path.exists(full_path):
-                                audio_text = FileConverter.extract_audio_text_from_video(full_path)
-                                new_content.append({"type": "text",
-                                                    "text": f"\n[Transcript of words spoken in video '{os.path.basename(url)}': \"{audio_text}\"]\n"})
-                                if is_latest:
-                                    file_size = os.path.getsize(full_path)
-                                    if file_size < MAX_VIDEO_SIZE_BYTES:
-                                        b64 = FileConverter.encode_media_base64(full_path)
-                                        mime = FileConverter.get_mime_type(full_path)
-                                        if b64:
-                                            part_copy = part.copy()
-                                            part_copy["video_url"] = {"url": f"data:{mime};base64,{b64}"}
-                                            new_content.append(part_copy)
-                                            continue
-                                    else:
-                                        print(
-                                            f"[Info] Video too large ({file_size / 1024 / 1024:.2f}MB). Extracting frames...")
-                                        frames = FileConverter.extract_frames_for_api(full_path, max_frames=20)
-                                        if frames:
-                                            new_content.append({"type": "text",
-                                                                "text": "[Video content represented by the following keyframes:]"})
-                                            for frame_b64 in frames:
-                                                new_content.append({"type": "image_url", "image_url": {
-                                                    "url": f"data:image/jpeg;base64,{frame_b64}"}})
-                                            continue
-                                else:
-                                    new_content.append({"type": "text",
-                                                        "text": f"[Visual video data for '{os.path.basename(url)}' removed to save resources. See transcript above.]"})
-                                    continue
-                        new_content.append(part)
+                        new_msg["content"].append(part.copy())
+
                     else:
-                        new_content.append(part)
-                new_msg["content"] = new_content
+                        new_msg["content"].append(part.copy())
+
             api_messages.append(new_msg)
         return api_messages
 
@@ -663,10 +818,12 @@ class StreamingMessageBubble(QFrame):
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(12, 12, 12, 12)
         self.layout.setSpacing(5)
+
         self.display_widget = QWidget()
         self.display_widget.setStyleSheet("background-color: transparent;")
         self.display_layout = QVBoxLayout(self.display_widget)
         self.display_layout.setContentsMargins(0, 0, 0, 0)
+
         self.label = ClickableLabel()
         self.label.setTextFormat(Qt.TextFormat.MarkdownText)
         self.label.setWordWrap(True)
@@ -679,49 +836,68 @@ class StreamingMessageBubble(QFrame):
         self.label.setText(text)
         self.label.linkActivated.connect(self.handle_link)
         self.display_layout.addWidget(self.label)
+
         self.typing_indicator = QLabel("...")
         self.typing_indicator.setStyleSheet(
-            "color: rgba(255, 255, 255, 0.7); font-style: italic; background-color: transparent; border: none; ")
+            "color: rgba(255, 255, 255, 0.7); font-style: italic; background-color: transparent; border: none;")
         self.typing_indicator.setVisible(False)
         self.display_layout.addWidget(self.typing_indicator)
+
         self.layout.addWidget(self.display_widget)
+
         self.edit_widget = QWidget()
         self.edit_widget.setVisible(False)
         self.edit_widget.setStyleSheet("background-color: transparent;")
         self.edit_layout = QVBoxLayout(self.edit_widget)
         self.edit_layout.setContentsMargins(8, 8, 8, 8)
         self.edit_layout.setSpacing(8)
+
         self.text_editor = QTextEdit()
         self.text_editor.setAcceptRichText(False)
         self.edit_layout.addWidget(self.text_editor)
+
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
         btn_row.addStretch()
+
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cancel_btn.clicked.connect(self.cancel_edit)
+
         self.save_btn = QPushButton("Update")
         self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.save_btn.clicked.connect(self.save_edit)
+
         btn_row.addWidget(self.cancel_btn)
         btn_row.addWidget(self.save_btn)
         self.edit_layout.addLayout(btn_row)
         self.layout.addWidget(self.edit_widget)
+
         self.setMaximumWidth(700)
+
         self.update_timer = QTimer()
         self.update_timer.setInterval(30)
         self.update_timer.timeout.connect(self.update_display_text)
+
         self.text_dirty = False
         self.text_editor.installEventFilter(self)
         self.update_theme()
+
+    def set_status(self, text):
+        """Updates the status text (e.g. 'Extracting...', 'Thinking...')."""
+        self.typing_indicator.setText(text)
+        if not self.typing_indicator.isVisible():
+            self.typing_indicator.setVisible(True)
 
     def update_theme(self):
         self.setStyleSheet(self._bubble_style())
         c = ThemeManager.PALETTES[ThemeManager.CURRENT_THEME]
         text_color = c["text_primary"]
         self.label.setStyleSheet(f"QLabel {{ color: {text_color}; background-color: transparent; border: none; }}")
+
         self.typing_indicator.setStyleSheet(
-            f"color: {c['text_secondary']}; background-color: transparent; border: none;")
+            f"color: {c['text_secondary']}; background-color: transparent; border: none; font-style: italic;")
+
         self.text_editor.setStyleSheet(f"""
             QTextEdit {{
                 background-color: {c['bg_input']}; 
@@ -828,6 +1004,7 @@ class StreamingMessageBubble(QFrame):
 
     def start_streaming(self):
         self.typing_indicator.setVisible(True)
+        self.typing_indicator.setText("...")
         self.update_timer.start()
 
     def stop_streaming(self):
@@ -1380,6 +1557,10 @@ class AIChatApp(QMainWindow):
         ThemeManager.toggle()
         self.apply_theme()
 
+    def handle_status_update(self, status_text):
+        if self.current_streaming_bubble:
+            self.current_streaming_bubble.set_status(status_text)
+
     def apply_theme(self):
         c = ThemeManager.PALETTES[ThemeManager.CURRENT_THEME]
 
@@ -1631,19 +1812,19 @@ class AIChatApp(QMainWindow):
                 icon_label = QLabel()
                 icon_label.setFixedSize(50, 50)
                 icon_label.setScaledContents(True)
-                icon_label.setStyleSheet(f"border: 1px solid {c['border']}; border-radius: 3px;")
+                icon_label.setStyleSheet(f"border: 0;")
                 if "thumbnail" in attachment and attachment["thumbnail"]:
                     icon_label.setPixmap(attachment["thumbnail"].scaled(50, 50, Qt.AspectRatioMode.KeepAspectRatio,
                                                                         Qt.TransformationMode.SmoothTransformation))
                 else:
                     icon_label.setText("🎥")
                     icon_label.setStyleSheet(
-                        f"font-size: 30px; border: 1px solid {c['border']}; border-radius: 3px; color: {c['text_primary']};")
+                        f"font-size: 30px; border: 0;; color: {c['text_primary']};")
                     icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 preview_layout.addWidget(icon_label)
             else:
                 file_icon = QLabel("📄")
-                file_icon.setStyleSheet("font-size: 30px;")
+                file_icon.setStyleSheet("font-size: 30px; border: 0;")
                 file_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 file_icon.setFixedSize(50, 50)
                 preview_layout.addWidget(file_icon)
@@ -2276,15 +2457,23 @@ class AIChatApp(QMainWindow):
         self.send_button.setText("Stop")
         self.send_button.setStyleSheet(
             "QPushButton { background-color: #e74c3c; color: white; padding: 10px 20px; font-weight: bold; border-radius: 5px; } QPushButton:hover { background-color: #c0392b; }")
+
         model = self.model_combo.currentText()
         messages_history = self.all_chats[self.current_chat_id]["messages"]
         is_image = self.is_image_model()
-        if not is_image: self.add_message_block("assistant", streaming=True)
+
+        if not is_image:
+            self.add_message_block("assistant", streaming=True)
+
         self.thread = AIResponseThread(model, messages_history, is_image)
         self.thread.response_chunk.connect(self.handle_stream_chunk)
         self.thread.response_complete.connect(self.handle_stream_complete)
         self.thread.error_occurred.connect(self.display_error)
         self.thread.image_generated.connect(self.handle_image_generated)
+        self.thread.status_update.connect(self.handle_status_update)
+
+        self.thread.transcript_ready.connect(self.save_current_chat)
+
         self.thread.start()
 
     def handle_image_generated(self, image_bytes, saved_path):
